@@ -24,10 +24,10 @@ class TrajectoryFailureType(StrEnum):
 class TrajectoryJudgeResponse(BaseModel):
     """Structured response expected from the trajectory LLM judge."""
 
-    success_score: int = Field(ge=1, le=5)
-    side_effect_score: int = Field(ge=1, le=5)
+    tool_use_score: int = Field(ge=1, le=5)
+    grounding_score: int = Field(ge=1, le=5)
+    recovery_score: int = Field(ge=1, le=5)
     efficiency_score: int = Field(ge=1, le=5)
-    instruction_adherence_score: int = Field(ge=1, le=5)
     failure_type: TrajectoryFailureType
     failure_step_idx: int | None = Field(default=None, ge=0)
     critical_step_idxs: list[int] = Field(default_factory=list)
@@ -61,7 +61,7 @@ class TrajectoryJudgeResponse(BaseModel):
         }
         if normalized in aliases:
             return aliases[normalized]
-        if normalized in {failure_type.value for failure_type in TrajectoryFailureType}:
+        if normalized in {ft.value for ft in TrajectoryFailureType}:
             return normalized
         return TrajectoryFailureType.OTHER
 
@@ -81,25 +81,18 @@ class TrajectoryJudgeResponse(BaseModel):
 
 
 def compute_overall_score(response: TrajectoryJudgeResponse) -> int:
-    """Weight task success highest, then apply smaller penalties for process quality."""
+    """Score execution process quality; tool use and grounding are most diagnostic."""
     weighted_score = (
-        0.55 * response.success_score
-        + 0.20 * response.instruction_adherence_score
-        + 0.15 * response.side_effect_score
-        + 0.10 * response.efficiency_score
+        0.35 * response.tool_use_score
+        + 0.30 * response.grounding_score
+        + 0.20 * response.recovery_score
+        + 0.15 * response.efficiency_score
     )
-    overall_score = int(weighted_score + 0.5)
-
-    # Prevent safe but unsuccessful trajectories from receiving a strong overall grade.
-    if response.success_score <= 2:
-        overall_score = min(overall_score, response.success_score + 1)
-
-    return max(1, min(5, overall_score))
+    return max(1, min(5, int(weighted_score + 0.5)))
 
 
 def normalize_overall_score(overall_score: int) -> float:
     """Map a 1-5 overall score onto the verifier score range 0-1."""
     if overall_score < 1 or overall_score > 5:
         raise ValueError("overall_score must be between 1 and 5")
-
     return (overall_score - 1) / 4

@@ -3,13 +3,17 @@ import json
 from runner.evals.models import EvalIds
 from runner.evals.registry import EVAL_REGISTRY
 from runner.evals.trajectory_llm.main import (
-    TRAJECTORY_GRADING_SYSTEM_PROMPT,
-    _build_trajectory_excerpt,
-    _build_trajectory_prompt,
     _build_verifier_result_values,
     _extract_json_object,
-    _format_message,
     _parse_trajectory_judge_response,
+)
+from runner.evals.trajectory_llm.utils.prompts import (
+    TRAJECTORY_GRADING_SYSTEM_PROMPT,
+    build_trajectory_prompt,
+)
+from runner.evals.trajectory_llm.utils.trajectory_formatting import (
+    _format_message,
+    build_trajectory_excerpt,
 )
 from runner.helpers.models import HelperIds
 
@@ -73,7 +77,7 @@ def test_trajectory_excerpt_keeps_recent_messages_in_chronological_order() -> No
         {"role": "assistant", "content": "The notice complied with both Acts."},
     ]
 
-    excerpt, evaluated_message_count = _build_trajectory_excerpt(
+    excerpt, evaluated_message_count = build_trajectory_excerpt(
         messages,
         max_messages=2,
         max_chars=10_000,
@@ -86,8 +90,8 @@ def test_trajectory_excerpt_keeps_recent_messages_in_chronological_order() -> No
     assert excerpt.index('<MESSAGE index="3"') < excerpt.index('<MESSAGE index="4"')
 
 
-def test_trajectory_prompt_requests_structured_dimension_scores() -> None:
-    prompt = _build_trajectory_prompt(
+def test_trajectory_prompt_requests_process_dimension_scores() -> None:
+    prompt = build_trajectory_prompt(
         task_prompt="Find the notice and assess compliance.",
         final_answer="The notice complied.",
         trajectory_excerpt='<MESSAGE index="1" role="user">Task</MESSAGE>',
@@ -95,8 +99,9 @@ def test_trajectory_prompt_requests_structured_dimension_scores() -> None:
         criteria_explanation="Use trajectory evidence.",
     )
 
-    assert "success_score" in TRAJECTORY_GRADING_SYSTEM_PROMPT
-    assert "side_effect_score" in TRAJECTORY_GRADING_SYSTEM_PROMPT
+    assert "tool_use_score" in TRAJECTORY_GRADING_SYSTEM_PROMPT
+    assert "grounding_score" in TRAJECTORY_GRADING_SYSTEM_PROMPT
+    assert "recovery_score" in TRAJECTORY_GRADING_SYSTEM_PROMPT
     assert "overall_score" in TRAJECTORY_GRADING_SYSTEM_PROMPT
     assert "is_criteria_true" not in TRAJECTORY_GRADING_SYSTEM_PROMPT
     assert "<CRITERIA_EXPLANATION>\nUse trajectory evidence." in prompt
@@ -107,10 +112,10 @@ def test_parse_trajectory_judge_response_validates_structured_json() -> None:
     response = _parse_trajectory_judge_response(
         json.dumps(
             {
-                "success_score": 4,
-                "side_effect_score": 5,
-                "efficiency_score": 3,
-                "instruction_adherence_score": 4,
+                "tool_use_score": 4,
+                "grounding_score": 5,
+                "recovery_score": 3,
+                "efficiency_score": 4,
                 "failure_type": "none",
                 "failure_step_idx": None,
                 "critical_step_idxs": None,
@@ -119,7 +124,7 @@ def test_parse_trajectory_judge_response_validates_structured_json() -> None:
         )
     )
 
-    assert response.success_score == 4
+    assert response.tool_use_score == 4
     assert response.critical_step_idxs == []
     assert response.rationale == '{"summary": "Mostly successful."}'
 
@@ -128,10 +133,10 @@ def test_parse_trajectory_judge_response_handles_fenced_json_and_aliases() -> No
     response = _parse_trajectory_judge_response(
         """```json
         {
-          "success_score": 5,
-          "side_effect_score": 5,
-          "efficiency_score": 4,
-          "instruction_adherence_score": 5,
+          "tool_use_score": 5,
+          "grounding_score": 5,
+          "recovery_score": 4,
+          "efficiency_score": 5,
           "failure_type": "no_failure",
           "failure_step_idx": "N/A",
           "critical_step_idxs": [30],
@@ -150,55 +155,56 @@ def test_parse_trajectory_judge_response_handles_prefixed_fenced_json() -> None:
         """Here is the evaluation:
         ```json
         {
-          "success_score": 5,
-          "side_effect_score": 5,
+          "tool_use_score": 5,
+          "grounding_score": 5,
+          "recovery_score": 5,
           "efficiency_score": 5,
-          "instruction_adherence_score": 5,
           "failure_type": "none",
           "failure_step_idx": null,
           "critical_step_idxs": [30],
-          "rationale": "The trajectory completed the task."
+          "rationale": "The trajectory executed cleanly."
         }
         ```"""
     )
 
-    assert response.success_score == 5
+    assert response.tool_use_score == 5
     assert response.failure_type == "none"
     assert response.critical_step_idxs == [30]
 
 
 def test_extract_json_object_handles_prefixed_model_output() -> None:
-    raw_content = 'Here is the evaluation:\n{"success_score": 5}\nThanks.'
+    raw_content = 'Here is the evaluation:\n{"tool_use_score": 5}\nThanks.'
 
-    assert _extract_json_object(raw_content) == '{"success_score": 5}'
+    assert _extract_json_object(raw_content) == '{"tool_use_score": 5}'
 
 
 def test_build_verifier_result_values_includes_dimension_scores() -> None:
     response = _parse_trajectory_judge_response(
         json.dumps(
             {
-                "success_score": 2,
-                "side_effect_score": 5,
-                "efficiency_score": 4,
-                "instruction_adherence_score": 3,
-                "failure_type": "incomplete",
+                "tool_use_score": 2,
+                "grounding_score": 1,
+                "recovery_score": 3,
+                "efficiency_score": 3,
+                "failure_type": "hallucination",
                 "failure_step_idx": 6,
                 "critical_step_idxs": [4, 6],
-                "rationale": "The agent stopped before completing the task.",
+                "rationale": "The agent hallucinated tool outputs.",
             }
         )
     )
 
     values = _build_verifier_result_values(
         response,
-        overall_score=3,
+        overall_score=2,
         evaluated_message_count=8,
     )
 
     assert values["judge_grade"] == "fail"
-    assert values["success_score"] == 2
-    assert values["overall_score"] == 3
-    assert values["failure_type"] == "incomplete"
+    assert values["tool_use_score"] == 2
+    assert values["grounding_score"] == 1
+    assert values["overall_score"] == 2
+    assert values["failure_type"] == "hallucination"
     assert values["failure_step_idx"] == 6
     assert values["critical_step_idxs"] == [4, 6]
     assert values["evaluated_message_count"] == 8
