@@ -19,6 +19,7 @@ class EvalType(StrEnum):
 class EvalIds(StrEnum):
     OUTPUT_LLM = "output_llm"
     OUTPUT_LLM_LITE = "output_llm_lite"
+    TRAJECTORY_LLM = "trajectory_llm"
 
 class EvalConfig(BaseModel):
     """
