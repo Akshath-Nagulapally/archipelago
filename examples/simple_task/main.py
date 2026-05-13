@@ -149,6 +149,8 @@ def tar_gz_to_zip(tar_gz_path: Path) -> Path:
 def main():
     trajectory_id = f"example_{uuid.uuid4().hex[:8]}"
     grading_run_id = f"gr_{uuid.uuid4().hex[:8]}"
+    output_dir = EXAMPLE_DIR / "output" / trajectory_id
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     log("=" * 60)
     log("SIMPLE TASK EXAMPLE")
@@ -179,6 +181,18 @@ def main():
     log("Configuring MCP servers...")
     with open(EXAMPLE_DIR / "mcp_config.json") as f:
         mcp_config = json.load(f)
+    with open(EXAMPLE_DIR / "eval_configs.json") as f:
+        eval_configs = json.load(f)
+    if not eval_configs:
+        log("ERROR: No eval configs found in eval_configs.json")
+        sys.exit(1)
+
+    eval_config_ids = [config["eval_config_id"] for config in eval_configs]
+    if len(eval_config_ids) != len(set(eval_config_ids)):
+        log("ERROR: Duplicate eval_config_id values found in eval_configs.json")
+        sys.exit(1)
+    with open(EXAMPLE_DIR / "verifiers.json") as f:
+        base_verifiers = json.load(f)
 
     resp = requests.post(f"{ENV_URL}/apps", json=mcp_config)
     resp.raise_for_status()
@@ -208,12 +222,12 @@ def main():
         "--orchestrator-model",
         orchestrator_config["model"],
         "--output",
-        str(EXAMPLE_DIR / "trajectory.json"),
+        str(output_dir / "trajectory.json"),
     ]
 
     # Add extra args if present
     if orchestrator_config.get("extra_args"):
-        extra_args_file = EXAMPLE_DIR / "orchestrator_extra_args.json"
+        extra_args_file = output_dir / "orchestrator_extra_args.json"
         with open(extra_args_file, "w") as f:
             json.dump(orchestrator_config["extra_args"], f)
         agent_cmd.extend(["--orchestrator-extra-args", str(extra_args_file)])
@@ -223,7 +237,7 @@ def main():
         log(f"WARNING: Agent exited with code {result.returncode}")
 
     # Check agent status
-    trajectory_file = EXAMPLE_DIR / "trajectory.json"
+    trajectory_file = output_dir / "trajectory.json"
     agent_status = None
     if trajectory_file.exists():
         with open(trajectory_file) as f:
@@ -236,7 +250,7 @@ def main():
     resp = requests.post(f"{ENV_URL}/data/snapshot", stream=True)
     resp.raise_for_status()
 
-    final_tar_gz = EXAMPLE_DIR / "final_snapshot.tar.gz"
+    final_tar_gz = output_dir / "final_snapshot.tar.gz"
     with open(final_tar_gz, "wb") as f:
         for chunk in resp.iter_content(chunk_size=65536):
             f.write(chunk)
@@ -248,55 +262,80 @@ def main():
     if agent_status != "completed":
         log(f"Skipping grading (agent status: {agent_status})")
     else:
-        log("Running grading...")
-        grading_cmd = [
-            "uv",
-            "run",
-            "python",
-            "-m",
-            "runner.main",
-            "--grading-run-id",
-            grading_run_id,
-            "--trajectory-id",
-            trajectory_id,
-            "--initial-snapshot",
-            str(EXAMPLE_DIR / "original_snapshot.zip"),
-            "--final-snapshot",
-            str(final_zip),
-            "--trajectory",
-            str(trajectory_file),
-            "--grading-settings",
-            str(EXAMPLE_DIR / "grading_settings.json"),
-            "--verifiers",
-            str(EXAMPLE_DIR / "verifiers.json"),
-            "--eval-configs",
-            str(EXAMPLE_DIR / "eval_configs.json"),
-            "--scoring-config",
-            str(EXAMPLE_DIR / "scoring_config.json"),
-            "--output",
-            str(EXAMPLE_DIR / "grades.json"),
-        ]
+        multiple_eval_configs = len(eval_configs) > 1
+        if multiple_eval_configs:
+            log(f"Running grading for {len(eval_configs)} eval configs...")
+        else:
+            log("Running grading...")
+        for eval_config in eval_configs:
+            eval_config_id = eval_config["eval_config_id"]
+            eval_config_name = eval_config["eval_config_name"]
+            verifiers = []
+            for verifier in base_verifiers:
+                verifier_copy = json.loads(json.dumps(verifier))
+                verifier_copy["eval_config_id"] = eval_config_id
+                verifier_values = verifier_copy.setdefault("verifier_values", {})
+                verifier_values["eval_config_id"] = eval_config_id
+                verifier_values["eval_config_name"] = eval_config_name
+                verifiers.append(verifier_copy)
 
-        result = subprocess.run(grading_cmd, cwd=GRADING_DIR)
-        if result.returncode != 0:
-            log(f"WARNING: Grading exited with code {result.returncode}")
+            verifiers_file = output_dir / f"verifiers__{eval_config_id}.json"
+            with open(verifiers_file, "w") as f:
+                json.dump(verifiers, f, indent=2)
 
-        # Display results
-        grades_file = EXAMPLE_DIR / "grades.json"
-        if grades_file.exists():
-            with open(grades_file) as f:
-                grades = json.load(f)
-            log("=" * 60)
-            log("GRADING RESULTS")
-            log("=" * 60)
-            log(f"Status: {grades.get('grading_run_status')}")
-            log(f"Final Score: {grades.get('scoring_results', {}).get('final_score')}")
-            for vr in grades.get("verifier_results", []):
-                log(f"  - {vr.get('verifier_id')}: {vr.get('score')}")
+            grades_file = output_dir / f"grades__{eval_config_id}.json"
+            grading_cmd = [
+                "uv",
+                "run",
+                "python",
+                "-m",
+                "runner.main",
+                "--grading-run-id",
+                f"{grading_run_id}__{eval_config_id}",
+                "--trajectory-id",
+                trajectory_id,
+                "--initial-snapshot",
+                str(EXAMPLE_DIR / "original_snapshot.zip"),
+                "--final-snapshot",
+                str(final_zip),
+                "--trajectory",
+                str(trajectory_file),
+                "--grading-settings",
+                str(EXAMPLE_DIR / "grading_settings.json"),
+                "--verifiers",
+                str(verifiers_file),
+                "--eval-configs",
+                str(EXAMPLE_DIR / "eval_configs.json"),
+                "--scoring-config",
+                str(EXAMPLE_DIR / "scoring_config.json"),
+                "--output",
+                str(grades_file),
+            ]
+
+            result = subprocess.run(grading_cmd, cwd=GRADING_DIR)
+            if result.returncode != 0:
+                log(
+                    f"WARNING: Grading exited with code {result.returncode} for {eval_config_id}"
+                )
+
+            if grades_file.exists():
+                with open(grades_file) as f:
+                    grades = json.load(f)
+                log("=" * 60)
+                log("GRADING RESULTS")
+                if multiple_eval_configs:
+                    log(f"Config: {eval_config_name} ({eval_config_id})")
+                log("=" * 60)
+                log(f"Status: {grades.get('grading_run_status')}")
+                log(
+                    f"Final Score: {grades.get('scoring_results', {}).get('final_score')}"
+                )
+                for vr in grades.get("verifier_results", []):
+                    log(f"  - {vr.get('verifier_id')}: {vr.get('score')}")
 
     log("=" * 60)
     log("DONE")
-    log(f"Output: {EXAMPLE_DIR}")
+    log(f"Output: {output_dir}")
     log("=" * 60)
 
 

@@ -324,9 +324,11 @@ cat grades.json | jq '.'
 ## Expected Output
 
 After a successful run:
+- Results are saved under `output/<trajectory_id>/`
 - `trajectory.json` - Agent's conversation history and tool calls
 - `final_snapshot.zip` - Final state of the filesystem
-- `grades.json` - Grading results with score and rationale
+- `grades__<eval_config_id>.json` - Grading results with score and rationale
+- `verifiers__<eval_config_id>.json` - Verifier config used for grading
 
 The agent should find and report the path `/animals/xk92m/qz7fw.png` as the gorilla image.
 
