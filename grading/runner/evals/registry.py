@@ -7,6 +7,7 @@ from runner.helpers.models import HelperIds
 from runner.models import TaskFieldSchema, TaskFieldType, VerifierResult
 
 from .output_llm import llm_judge_eval
+from .trajectory_llm import trajectory_llm_eval
 
 EvalImpl = Callable[
     [EvalImplInput],
@@ -218,6 +219,79 @@ EVAL_REGISTRY: dict[EvalIds, EvalDefn] = {
                 field_type=TaskFieldType.TEXT,
                 label="Evaluated Artifacts",
                 description="Files that were evaluated for this criterion",
+                required=False,
+            ),
+        ],
+    ),
+    EvalIds.TRAJECTORY_LLM: EvalDefn(
+        eval_id=EvalIds.TRAJECTORY_LLM,
+        eval_impl=trajectory_llm_eval,
+        helper_dependencies=[
+            HelperIds.FINAL_ANSWER,
+        ],
+        eval_types=[EvalType.LLM_JUDGE],
+        eval_config_fields=[
+            TaskFieldSchema(
+                field_id="trajectory_max_messages",
+                field_type=TaskFieldType.NUMBER,
+                label="Trajectory Max Messages",
+                description="Maximum number of recent trajectory messages to include when grading.",
+                default_value=12,
+                required=False,
+                display_hidden=True,
+            ),
+            TaskFieldSchema(
+                field_id="trajectory_max_chars",
+                field_type=TaskFieldType.NUMBER,
+                label="Trajectory Max Chars",
+                description="Maximum combined character budget for recent trajectory context.",
+                default_value=12000,
+                required=False,
+                display_hidden=True,
+            ),
+        ],
+        verifier_config_fields=[
+            TaskFieldSchema(
+                field_id="criteria",
+                field_type=TaskFieldType.TEXTAREA,
+                label="Criteria",
+                description="What should be verified in the trajectory or final answer?",
+                required=True,
+            ),
+            TaskFieldSchema(
+                field_id="criteria_explanation",
+                field_type=TaskFieldType.TEXTAREA,
+                label="Criteria Explanation",
+                description="Additional context for the criteria",
+                required=False,
+            ),
+            TaskFieldSchema(
+                field_id="is_primary_objective",
+                field_type=TaskFieldType.BOOLEAN,
+                label="Is this a primary criterion?",
+                description="Designates the importance of the criterion for reporting purposes.",
+                default_value=True,
+                required=True,
+            ),
+        ],
+        verifier_output_fields=[
+            TaskFieldSchema(
+                field_id="judge_grade",
+                field_type=TaskFieldType.TEXT,
+                label="Judge Grade",
+                description="Pass or fail grade from LLM",
+            ),
+            TaskFieldSchema(
+                field_id="grade_rationale",
+                field_type=TaskFieldType.TEXTAREA,
+                label="Rationale",
+                description="Explanation for the grade",
+            ),
+            TaskFieldSchema(
+                field_id="evaluated_message_count",
+                field_type=TaskFieldType.NUMBER,
+                label="Evaluated Message Count",
+                description="Number of recent trajectory messages included for grading.",
                 required=False,
             ),
         ],
