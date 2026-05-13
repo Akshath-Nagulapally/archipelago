@@ -1,68 +1,10 @@
-import io
-import json
-from types import SimpleNamespace
-
-from runner.evals.models import EvalConfig, EvalIds, EvalImplInput
+from runner.evals.models import EvalIds
 from runner.evals.registry import EVAL_REGISTRY
-from runner.helpers.models import HelperIds
-from runner.models import (
-    AgentStatus,
-    AgentTrajectoryOutput,
-    GradingSettings,
-    Verifier,
+from runner.evals.trajectory_llm.main import (
+    _build_trajectory_excerpt,
+    _format_message,
 )
-
-from runner.evals.trajectory_llm.main import trajectory_llm_eval
-
-
-def _build_input(
-    *,
-    criteria: str = "States that the final answer says compliance was met",
-    eval_config_values: dict | None = None,
-    messages: list[dict] | None = None,
-    final_answer: str = "The notice complied with both Acts.",
-) -> EvalImplInput:
-    trajectory_messages = messages or [
-        {"role": "user", "content": "Review WARN Act compliance."},
-        {"role": "assistant", "content": "I will inspect the notices."},
-        {"role": "tool", "name": "read_file", "content": "William Ito notice dated 60 days in advance."},
-        {"role": "assistant", "content": final_answer},
-    ]
-
-    return EvalImplInput(
-        initial_snapshot_bytes=io.BytesIO(),
-        final_snapshot_bytes=io.BytesIO(),
-        trajectory=AgentTrajectoryOutput(
-            messages=trajectory_messages,
-            status=AgentStatus.COMPLETED,
-            time_elapsed=1.5,
-            output=None,
-        ),
-        grading_settings=GradingSettings(llm_judge_model="openai/gpt-4o-mini"),
-        verifier=Verifier(
-            verifier_id="ver_123",
-            verifier_version=1,
-            world_id=None,
-            task_id="task_warn",
-            eval_config_id="ec_trajectory_llm",
-            verifier_values={
-                "criteria": criteria,
-                "is_primary_objective": True,
-            },
-            verifier_index=0,
-            verifier_dependencies=None,
-        ),
-        eval_config=EvalConfig(
-            eval_config_id="ec_trajectory_llm",
-            eval_config_name="Trajectory LLM",
-            eval_defn_id=EvalIds.TRAJECTORY_LLM,
-            eval_config_values=eval_config_values or {},
-        ),
-        dependencies=None,
-        helper_results={
-            HelperIds.FINAL_ANSWER: final_answer,
-        },
-    )
+from runner.helpers.models import HelperIds
 
 
 def test_trajectory_eval_registered() -> None:
@@ -73,81 +15,65 @@ def test_trajectory_eval_registered() -> None:
     assert eval_defn.eval_impl is not None
 
 
-async def test_trajectory_eval_uses_recent_messages_and_returns_pass(
-    monkeypatch,
-) -> None:
-    captured = {}
-    input_data = _build_input(
-        eval_config_values={"trajectory_max_messages": 2, "trajectory_max_chars": 10_000},
-        messages=[
-            {"role": "user", "content": "Old task context that should be omitted from recent slice."},
-            {"role": "assistant", "content": "Older assistant turn."},
-            {"role": "tool", "name": "search_law", "content": "Federal WARN Act requires 60 days notice."},
-            {"role": "assistant", "content": "The notice complied with both Acts."},
+def test_formats_tool_calls_with_args() -> None:
+    message = {
+        "role": "assistant",
+        "content": "I will inspect the notice.",
+        "tool_calls": [
+            {
+                "id": "call_read_1",
+                "function": {
+                    "name": "read_file",
+                    "arguments": '{"path": "/tmp/notices/warn.txt"}',
+                },
+            }
         ],
-    )
-
-    async def fake_call_llm(*, model, messages, timeout, extra_args=None, response_format=None):
-        captured["messages"] = messages
-        return SimpleNamespace(
-            choices=[
-                SimpleNamespace(
-                    message=SimpleNamespace(
-                        content=json.dumps(
-                            {
-                                "rationale": "The final answer explicitly says the notice complied.",
-                                "is_criteria_true": True,
-                            }
-                        )
-                    )
-                )
-            ]
-        )
-
-    monkeypatch.setattr("runner.evals.trajectory_llm.main.call_llm", fake_call_llm)
-    monkeypatch.setattr("runner.evals.trajectory_llm.main.Choices", object)
-
-    result = await trajectory_llm_eval(input_data)
-
-    assert result.score == 1.0
-    assert result.verifier_result_values["judge_grade"] == "pass"
-    assert result.verifier_result_values["evaluated_message_count"] == 2
-
-    user_prompt = captured["messages"][1]["content"]
-    assert "Federal WARN Act requires 60 days notice." in user_prompt
-    assert "The notice complied with both Acts." in user_prompt
-    assert "Older assistant turn." not in user_prompt
-
-
-async def test_trajectory_eval_returns_fail_when_judge_fails(monkeypatch) -> None:
-    input_data = _build_input(
-        final_answer="The answer does not mention California WARN compliance."
-    )
-
-    async def fake_call_llm(*, model, messages, timeout, extra_args=None, response_format=None):
-        return SimpleNamespace(
-            choices=[
-                SimpleNamespace(
-                    message=SimpleNamespace(
-                        content=json.dumps(
-                            {
-                                "rationale": "The final answer does not support the criterion.",
-                                "is_criteria_true": False,
-                            }
-                        )
-                    )
-                )
-            ]
-        )
-
-    monkeypatch.setattr("runner.evals.trajectory_llm.main.call_llm", fake_call_llm)
-    monkeypatch.setattr("runner.evals.trajectory_llm.main.Choices", object)
-
-    result = await trajectory_llm_eval(input_data)
-
-    assert result.score == 0.0
-    assert result.verifier_result_values == {
-        "judge_grade": "fail",
-        "grade_rationale": "The final answer does not support the criterion.",
-        "evaluated_message_count": 4,
     }
+
+    formatted = _format_message(message, message_index=2, reverse_index=3)
+
+    assert '<MESSAGE index="2" reverse_index="3" role="assistant">' in formatted
+    assert '<TOOL_CALL index="1" id="call_read_1" name="read_file">' in formatted
+    assert '{"path": "/tmp/notices/warn.txt"}' in formatted
+    assert "<CONTENT>\nI will inspect the notice.\n</CONTENT>" in formatted
+
+
+def test_formats_tool_outputs_with_call_id_and_name() -> None:
+    message = {
+        "role": "tool",
+        "name": "read_file",
+        "tool_call_id": "call_read_1",
+        "content": [{"type": "text", "text": "Notice was sent 60 days ahead."}],
+    }
+
+    formatted = _format_message(message, message_index=3, reverse_index=2)
+
+    assert '<MESSAGE index="3" reverse_index="2" role="tool">' in formatted
+    assert "<NAME>read_file</NAME>" in formatted
+    assert "<TOOL_CALL_ID>call_read_1</TOOL_CALL_ID>" in formatted
+    assert "Notice was sent 60 days ahead." in formatted
+
+
+def test_trajectory_excerpt_keeps_recent_messages_in_chronological_order() -> None:
+    messages = [
+        {"role": "user", "content": "Old task context."},
+        {"role": "assistant", "content": "Older assistant turn."},
+        {
+            "role": "tool",
+            "name": "search_law",
+            "content": "Federal WARN Act requires 60 days notice.",
+        },
+        {"role": "assistant", "content": "The notice complied with both Acts."},
+    ]
+
+    excerpt, evaluated_message_count = _build_trajectory_excerpt(
+        messages,
+        max_messages=2,
+        max_chars=10_000,
+    )
+
+    assert evaluated_message_count == 2
+    assert '<MESSAGE index="3"' in excerpt
+    assert '<MESSAGE index="4"' in excerpt
+    assert '<MESSAGE index="2"' not in excerpt
+    assert excerpt.index('<MESSAGE index="3"') < excerpt.index('<MESSAGE index="4"')

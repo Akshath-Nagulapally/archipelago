@@ -1,6 +1,7 @@
 """LLM judge eval for grading agent trajectories."""
 
 import json
+from html import escape
 from typing import Any
 
 from litellm import Choices
@@ -23,7 +24,11 @@ from ..output_llm.utils.prompts import (
     STRICT_CRITERION_MATCHING,
     TOLERANCE_NOTES,
 )
-from ..output_llm.utils.shared import LLM_JUDGE_TIMEOUT, MAX_JSON_RETRIES, extract_task_prompt
+from ..output_llm.utils.shared import (
+    LLM_JUDGE_TIMEOUT,
+    MAX_JSON_RETRIES,
+    extract_task_prompt,
+)
 
 TRAJECTORY_GRADING_SYSTEM_PROMPT = "\n\n".join(
     [
@@ -40,6 +45,12 @@ TRAJECTORY_GRADING_SYSTEM_PROMPT = "\n\n".join(
 DEFAULT_MAX_MESSAGES = 12
 DEFAULT_MAX_CHARS = 12_000
 MAX_SINGLE_MESSAGE_CHARS = 2_000
+MAX_TOOL_ARGUMENT_CHARS = 2_000
+
+
+def _xml_attr(value: Any) -> str:
+    """Escape a value for use in XML-style prompt attributes."""
+    return escape(str(value), quote=True)
 
 
 def _get_message_value(message: Any, key: str, default: Any = None) -> Any:
@@ -76,35 +87,92 @@ def _normalize_content(content: Any) -> str:
     return str(content)
 
 
-def _format_message(message: Any, reverse_index: int) -> str:
+def _truncate_text(text: str, max_chars: int) -> str:
+    """Truncate prompt text with an explicit marker."""
+    if len(text) <= max_chars:
+        return text
+    return f"{text[:max_chars]}...[truncated]"
+
+
+def _format_tool_arguments(arguments: Any) -> str:
+    """Render tool arguments in a stable, readable form for the judge."""
+    if arguments is None:
+        return "{}"
+
+    if isinstance(arguments, str):
+        stripped = arguments.strip()
+        if not stripped:
+            return "{}"
+        try:
+            parsed = json.loads(stripped)
+            rendered = json.dumps(parsed, ensure_ascii=True, sort_keys=True)
+        except json.JSONDecodeError:
+            rendered = stripped
+    else:
+        rendered = _normalize_content(arguments).strip() or "{}"
+
+    return _truncate_text(rendered, MAX_TOOL_ARGUMENT_CHARS)
+
+
+def _format_tool_call(tool_call: Any, call_index: int) -> str:
+    """Format an assistant tool call with its name and arguments."""
+    function = _get_message_value(tool_call, "function", {})
+    tool_name = _get_message_value(function, "name", "unknown")
+    arguments = _format_tool_arguments(
+        _get_message_value(function, "arguments", "{}")
+    )
+    tool_call_id = _get_message_value(tool_call, "id")
+
+    id_attr = f' id="{_xml_attr(tool_call_id)}"' if tool_call_id else ""
+    lines = [
+        f'<TOOL_CALL index="{call_index}"{id_attr} name="{_xml_attr(tool_name)}">'
+    ]
+    lines.append("<ARGS>")
+    lines.append(arguments)
+    lines.append("</ARGS>")
+    lines.append("</TOOL_CALL>")
+    return "\n".join(lines)
+
+
+def _format_tool_calls(tool_calls: Any) -> str | None:
+    """Format all assistant tool calls, if present."""
+    if not tool_calls:
+        return None
+
+    formatted_calls = [
+        _format_tool_call(tool_call, call_index)
+        for call_index, tool_call in enumerate(tool_calls, start=1)
+    ]
+    if not formatted_calls:
+        return None
+
+    return "\n".join(["<TOOL_CALLS>", *formatted_calls, "</TOOL_CALLS>"])
+
+
+def _format_message(message: Any, message_index: int, reverse_index: int) -> str:
     """Format one trajectory message for the grading prompt."""
     role = str(_get_message_value(message, "role", "unknown"))
     name = _get_message_value(message, "name")
+    tool_call_id = _get_message_value(message, "tool_call_id")
     tool_calls = _get_message_value(message, "tool_calls")
     content = _normalize_content(_get_message_value(message, "content", ""))
-    content = content.strip()
+    content = _truncate_text(content.strip(), MAX_SINGLE_MESSAGE_CHARS)
 
-    if len(content) > MAX_SINGLE_MESSAGE_CHARS:
-        content = f"{content[:MAX_SINGLE_MESSAGE_CHARS]}...[truncated]"
-
-    lines = [f"<MESSAGE reverse_index=\"{reverse_index}\" role=\"{role}\">"]
+    lines = [
+        f'<MESSAGE index="{message_index}" reverse_index="{reverse_index}" role="{_xml_attr(role)}">'
+    ]
     if name:
         lines.append(f"<NAME>{name}</NAME>")
+    if tool_call_id:
+        lines.append(f"<TOOL_CALL_ID>{tool_call_id}</TOOL_CALL_ID>")
 
-    if tool_calls:
-        tool_names = []
-        for tool_call in tool_calls:
-            function = _get_message_value(tool_call, "function")
-            if isinstance(function, dict):
-                tool_name = function.get("name")
-            else:
-                tool_name = getattr(function, "name", None)
-            if tool_name:
-                tool_names.append(str(tool_name))
-        if tool_names:
-            lines.append(f"<TOOL_CALLS>{', '.join(tool_names)}</TOOL_CALLS>")
+    formatted_tool_calls = _format_tool_calls(tool_calls)
+    if formatted_tool_calls:
+        lines.append(formatted_tool_calls)
 
+    lines.append("<CONTENT>")
     lines.append(content or "(empty)")
+    lines.append("</CONTENT>")
     lines.append("</MESSAGE>")
     return "\n".join(lines)
 
@@ -123,11 +191,18 @@ def _build_trajectory_excerpt(
     selected: list[str] = []
     total_chars = 0
 
+    message_count = len(messages)
+
     for reverse_index, message in enumerate(reversed(messages), start=1):
         if len(selected) >= max_messages:
             break
 
-        formatted = _format_message(message, reverse_index)
+        message_index = message_count - reverse_index + 1
+        formatted = _format_message(
+            message,
+            message_index=message_index,
+            reverse_index=reverse_index,
+        )
         next_chars = total_chars + len(formatted)
         if selected and next_chars > max_chars:
             break

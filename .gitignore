@@ -218,6 +218,9 @@ __marimo__/
 # Archipelago specific
 output/
 outputs/
+examples/**/final_snapshot.zip
+examples/**/grades.json
+examples/**/trajectory.json
 *.tar.gz
 
 # OS files
