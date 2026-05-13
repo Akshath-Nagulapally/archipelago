@@ -1,10 +1,11 @@
-# LLM judge eval for grading agent trajectories.
-#
-# Loosely inspired by:
-# 1. AgentRewardBench: LLM judge over web-agent trajectories with structured
-#    criteria for success, side effects, repetitiveness, and rubric reliability.
-# 2. TRAJECT-Bench: trajectory-aware evaluation that scores full tool-use
-#    trajectories, not just final answers.
+"""LLM judge eval for grading agent trajectories.
+
+Loosely inspired by:
+1. AgentRewardBench: LLM judge over web-agent trajectories with structured
+   criteria for success, side effects, repetitiveness, and rubric reliability.
+2. TRAJECT-Bench: trajectory-aware evaluation that scores full tool-use
+   trajectories, not just final answers.
+"""
 
 import json
 from html import escape
@@ -74,19 +75,19 @@ RAW_RESPONSE_PREVIEW_CHARS = 500
 
 
 def _xml_attr(value: Any) -> str:
-    # Escape a value for use in XML-style prompt attributes.
+    """Escape a value for use in XML-style prompt attributes."""
     return escape(str(value), quote=True)
 
 
 def _get_message_value(message: Any, key: str, default: Any = None) -> Any:
-    # Read a key from either dict-like or pydantic message objects.
+    """Read a key from either dict-like or pydantic message objects."""
     if isinstance(message, dict):
         return message.get(key, default)
     return getattr(message, key, default)
 
 
 def _normalize_content(content: Any) -> str:
-    # Collapse LiteLLM text/image blocks into one judge-readable content string.
+    """Collapse LiteLLM text/image blocks into one judge-readable content string."""
     if content is None:
         return ""
     if isinstance(content, str):
@@ -113,14 +114,14 @@ def _normalize_content(content: Any) -> str:
 
 
 def _truncate_text(text: str, max_chars: int) -> str:
-    # Truncate prompt text with an explicit marker.
+    """Truncate prompt text with an explicit marker."""
     if len(text) <= max_chars:
         return text
     return f"{text[:max_chars]}...[truncated]"
 
 
 def _format_tool_arguments(arguments: Any) -> str:
-    # Prefer canonical JSON so repeated tool calls are easy to compare in the prompt.
+    """Prefer canonical JSON so repeated tool calls are easy to compare in the prompt."""
     if arguments is None:
         return "{}"
 
@@ -140,7 +141,7 @@ def _format_tool_arguments(arguments: Any) -> str:
 
 
 def _format_tool_call(tool_call: Any, call_index: int) -> str:
-    # Preserve tool name, id, and args so the judge can connect actions to later outputs.
+    """Preserve tool name, id, and args so the judge can connect actions to later outputs."""
     function = _get_message_value(tool_call, "function", {})
     tool_name = _get_message_value(function, "name", "unknown")
     arguments = _format_tool_arguments(
@@ -160,7 +161,7 @@ def _format_tool_call(tool_call: Any, call_index: int) -> str:
 
 
 def _format_tool_calls(tool_calls: Any) -> str | None:
-    # Format all assistant tool calls, if present.
+    """Format all assistant tool calls, if present."""
     if not tool_calls:
         return None
 
@@ -175,8 +176,9 @@ def _format_tool_calls(tool_calls: Any) -> str | None:
 
 
 def _format_message(message: Any, message_index: int, reverse_index: int) -> str:
-    # Attach both original and reverse indices: original indices are for judge citations,
-    # reverse indices explain why only recent messages may appear in the excerpt.
+    """Attach both original and reverse indices: original indices are for judge citations,
+    reverse indices explain why only recent messages may appear in the excerpt.
+    """
     role = str(_get_message_value(message, "role", "unknown"))
     name = _get_message_value(message, "name")
     tool_call_id = _get_message_value(message, "tool_call_id")
@@ -273,7 +275,7 @@ def _build_trajectory_prompt(
 
 
 def _parse_trajectory_judge_response(raw_content: str) -> TrajectoryJudgeResponse:
-    # Normalize small provider differences before handing off to the typed schema.
+    """Normalize small provider differences before handing off to the typed schema."""
     raw_json = json.loads(_extract_json_object(raw_content))
     if not isinstance(raw_json, dict):
         raise ValueError("Trajectory judge response must be a JSON object")
@@ -286,7 +288,7 @@ def _parse_trajectory_judge_response(raw_content: str) -> TrajectoryJudgeRespons
 
 
 def _extract_json_object(raw_content: str) -> str:
-    # Some providers still wrap JSON in Markdown fences despite response_format hints.
+    """Some providers still wrap JSON in Markdown fences despite response_format hints."""
     content = raw_content.strip()
     if content.startswith("```"):
         lines = content.splitlines()
@@ -309,7 +311,7 @@ def _extract_json_object(raw_content: str) -> str:
 
 
 def _preview_raw_response(raw_content: str | None) -> str:
-    # Compact raw model output for retry logs without flooding grading logs.
+    """Compact raw model output for retry logs without flooding grading logs."""
     if not raw_content:
         return "(empty)"
     preview = raw_content.replace("\n", "\\n")
@@ -322,7 +324,7 @@ def _build_verifier_result_values(
     overall_score: int,
     evaluated_message_count: int,
 ) -> dict[str, Any]:
-    # Preserve legacy display fields while exposing the full trajectory rubric breakdown.
+    """Preserve legacy display fields while exposing the full trajectory rubric breakdown."""
     return {
         "judge_grade": "pass" if overall_score >= 4 else "fail",
         "grade_rationale": judge_response.rationale,

@@ -1,4 +1,4 @@
-# Typed models and scoring policy for trajectory judge responses.
+"""Typed models and scoring policy for trajectory judge responses."""
 
 from enum import StrEnum
 from typing import Any
@@ -7,7 +7,8 @@ from pydantic import BaseModel, Field, field_validator
 
 
 class TrajectoryFailureType(StrEnum):
-    # High-level failure categories for trajectory-level grading.
+    """High-level failure categories for trajectory-level grading."""
+
     NONE = "none"
     PLANNING = "planning"
     MEMORY = "memory"
@@ -21,7 +22,8 @@ class TrajectoryFailureType(StrEnum):
 
 
 class TrajectoryJudgeResponse(BaseModel):
-    # Structured response expected from the trajectory LLM judge.
+    """Structured response expected from the trajectory LLM judge."""
+
     success_score: int = Field(ge=1, le=5)
     side_effect_score: int = Field(ge=1, le=5)
     efficiency_score: int = Field(ge=1, le=5)
@@ -34,7 +36,7 @@ class TrajectoryJudgeResponse(BaseModel):
     @field_validator("failure_type", mode="before")
     @classmethod
     def normalize_failure_type(cls, value: Any) -> Any:
-        # Keep the persisted taxonomy stable even when judges use near-synonyms.
+        """Keep the persisted taxonomy stable even when judges use near-synonyms."""
         if value is None:
             return TrajectoryFailureType.NONE
         if isinstance(value, TrajectoryFailureType):
@@ -66,7 +68,7 @@ class TrajectoryJudgeResponse(BaseModel):
     @field_validator("failure_step_idx", mode="before")
     @classmethod
     def normalize_failure_step_idx(cls, value: Any) -> Any:
-        # Models often emit human placeholders for optional integer fields.
+        """Models often emit human placeholders for optional integer fields."""
         if isinstance(value, str) and value.strip().lower() in {
             "",
             "none",
@@ -79,7 +81,7 @@ class TrajectoryJudgeResponse(BaseModel):
 
 
 def compute_overall_score(response: TrajectoryJudgeResponse) -> int:
-    # Weight task success highest, then apply smaller penalties for process quality.
+    """Weight task success highest, then apply smaller penalties for process quality."""
     weighted_score = (
         0.55 * response.success_score
         + 0.20 * response.instruction_adherence_score
@@ -96,7 +98,7 @@ def compute_overall_score(response: TrajectoryJudgeResponse) -> int:
 
 
 def normalize_overall_score(overall_score: int) -> float:
-    # Map a 1-5 overall score onto the verifier score range 0-1.
+    """Map a 1-5 overall score onto the verifier score range 0-1."""
     if overall_score < 1 or overall_score > 5:
         raise ValueError("overall_score must be between 1 and 5")
 
