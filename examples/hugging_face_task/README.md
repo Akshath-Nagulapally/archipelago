@@ -58,10 +58,10 @@ Results are saved to `output/<task_id>/`:
 |------|-------------|
 | `trajectory.json` | Agent's conversation history and tool calls |
 | `final_snapshot.zip` | Final state of the environment |
-| `grades.json` | Grading results with scores and rationale |
+| `grades__<eval_config_id>.json` | Grading results with scores and rationale |
 | `initial_messages.json` | Task prompt (from HuggingFace) |
-| `agent_config.json` | Agent configuration used |
-| `verifiers.json` | Grading criteria (from HuggingFace rubric) |
+| `orchestrator_extra_args.json` | Optional orchestrator args used for the run |
+| `verifiers__<eval_config_id>.json` | Grading criteria generated from the HuggingFace rubric |
 
 ## How It Works
 

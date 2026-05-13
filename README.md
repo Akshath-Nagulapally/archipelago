@@ -98,12 +98,24 @@ Both scripts will:
 ### 3. Check Results
 
 ```bash
-# View grading results
-cat ./grades.json | jq '.scoring_results.final_score'
+# Simple task outputs
+ls examples/simple_task/output/
 
-# View agent trajectory
-cat ./trajectory.json | jq '.status'
+# Hugging Face task outputs
+ls examples/hugging_face_task/output/
 ```
+
+Example runs are saved under per-run output directories:
+
+- `examples/simple_task/output/<trajectory_id>/`
+- `examples/hugging_face_task/output/<task_id>/`
+
+Inside each run directory, look for:
+
+- `trajectory.json` for agent status and tool-call history
+- `final_snapshot.zip` for the final environment snapshot
+- `grades__<eval_config_id>.json` for grading results
+- `verifiers__<eval_config_id>.json` for the exact verifier config used
 
 ---
 
@@ -483,7 +495,7 @@ The easiest way to run Archipelago locally is using Docker.
 
 The grading system will automatically validate configuration, compute snapshot diffs, generate screenshots for visual artifacts, grade against all verifiers, and output detailed results.
 
-**Output**: When running locally (without webhook configured), results are saved to `.output/grades_<grading_run_id>.json` with:
+**Output**: When running the grading runner directly with `--output`, results are saved to the path you provide, for example `.output/grades_<grading_run_id>.json`, with:
 
 - Individual grades for each verifier
 - Final score

@@ -222,6 +222,17 @@ def main():
         mcp_config = json.load(f)
     log(f"  Servers: {list(mcp_config['mcpServers'].keys())}")
 
+    with open(EXAMPLE_DIR / "eval_configs.json") as f:
+        eval_configs = json.load(f)
+    if not eval_configs:
+        log("ERROR: No eval configs found in eval_configs.json")
+        sys.exit(1)
+
+    eval_config_ids = [config["eval_config_id"] for config in eval_configs]
+    if len(eval_config_ids) != len(set(eval_config_ids)):
+        log("ERROR: Duplicate eval_config_id values found in eval_configs.json")
+        sys.exit(1)
+
     resp = httpx.post(f"{ENV_URL}/apps", json=mcp_config, timeout=600.0)
     resp.raise_for_status()
     log("MCP servers configured")
@@ -329,72 +340,89 @@ Don't over-explain. Be concise but show your thinking.
     if agent_status != "completed":
         log(f"Skipping grading (agent status: {agent_status})")
     else:
-        log("Running grading...")
+        multiple_eval_configs = len(eval_configs) > 1
+        if multiple_eval_configs:
+            log(f"Running grading for {len(eval_configs)} eval configs...")
+        else:
+            log("Running grading...")
 
-        # Generate verifiers from HuggingFace rubric
-        verifiers = [
-            {
-                "verifier_id": c["verifier_id"],
-                "verifier_version": 1,
-                "world_id": world_id,
-                "task_id": task["task_id"],
-                "eval_config_id": "ec_output_llm",
-                "verifier_values": {
-                    "criteria": c["criteria"],
-                    "is_primary_objective": i == 0,
-                },
-                "verifier_index": i,
-                "verifier_dependencies": None,
-            }
-            for i, c in enumerate(task.get("rubric", []))
-        ]
-        with open(output_dir / "verifiers.json", "w") as f:
-            json.dump(verifiers, f, indent=2)
+        for eval_config in eval_configs:
+            eval_config_id = eval_config["eval_config_id"]
+            eval_config_name = eval_config["eval_config_name"]
+            verifiers = [
+                {
+                    "verifier_id": criterion["verifier_id"],
+                    "verifier_version": 1,
+                    "world_id": world_id,
+                    "task_id": task["task_id"],
+                    "eval_config_id": eval_config_id,
+                    "verifier_values": {
+                        "criteria": criterion["criteria"],
+                        "is_primary_objective": criterion_index == 0,
+                        "hf_verifier_id": criterion["verifier_id"],
+                        "eval_config_id": eval_config_id,
+                        "eval_config_name": eval_config_name,
+                    },
+                    "verifier_index": criterion_index,
+                    "verifier_dependencies": None,
+                }
+                for criterion_index, criterion in enumerate(task.get("rubric", []))
+            ]
 
-        grades_file = output_dir / "grades.json"
+            verifiers_file = output_dir / f"verifiers__{eval_config_id}.json"
+            with open(verifiers_file, "w") as f:
+                json.dump(verifiers, f, indent=2)
 
-        grading_cmd = [
-            "uv",
-            "run",
-            "python",
-            "-m",
-            "runner.main",
-            "--grading-run-id",
-            grading_run_id,
-            "--trajectory-id",
-            trajectory_id,
-            "--initial-snapshot",
-            str(world_zip),
-            "--final-snapshot",
-            str(final_zip),
-            "--trajectory",
-            str(trajectory_file),
-            "--grading-settings",
-            str(EXAMPLE_DIR / "grading_settings.json"),
-            "--verifiers",
-            str(output_dir / "verifiers.json"),
-            "--eval-configs",
-            str(EXAMPLE_DIR / "eval_configs.json"),
-            "--scoring-config",
-            str(EXAMPLE_DIR / "scoring_config.json"),
-            "--output",
-            str(grades_file),
-        ]
+            grades_file = output_dir / f"grades__{eval_config_id}.json"
 
-        result = subprocess.run(grading_cmd, cwd=GRADING_DIR)
-        if result.returncode != 0:
-            log(f"WARNING: Grading exited with code {result.returncode}")
+            grading_cmd = [
+                "uv",
+                "run",
+                "python",
+                "-m",
+                "runner.main",
+                "--grading-run-id",
+                f"{grading_run_id}__{eval_config_id}",
+                "--trajectory-id",
+                trajectory_id,
+                "--initial-snapshot",
+                str(world_zip),
+                "--final-snapshot",
+                str(final_zip),
+                "--trajectory",
+                str(trajectory_file),
+                "--grading-settings",
+                str(EXAMPLE_DIR / "grading_settings.json"),
+                "--verifiers",
+                str(verifiers_file),
+                "--eval-configs",
+                str(EXAMPLE_DIR / "eval_configs.json"),
+                "--scoring-config",
+                str(EXAMPLE_DIR / "scoring_config.json"),
+                "--output",
+                str(grades_file),
+            ]
 
-        if grades_file.exists():
-            with open(grades_file) as f:
-                grades = json.load(f)
-            log("=" * 60)
-            log("GRADING RESULTS")
-            log("=" * 60)
-            log(f"Status: {grades.get('grading_run_status')}")
-            log(f"Final Score: {grades.get('scoring_results', {}).get('final_score')}")
-            for vr in grades.get("verifier_results", []):
-                log(f"  - {vr.get('verifier_id')}: {vr.get('score')}")
+            result = subprocess.run(grading_cmd, cwd=GRADING_DIR)
+            if result.returncode != 0:
+                log(
+                    f"WARNING: Grading exited with code {result.returncode} for {eval_config_id}"
+                )
+
+            if grades_file.exists():
+                with open(grades_file) as f:
+                    grades = json.load(f)
+                log("=" * 60)
+                log("GRADING RESULTS")
+                if multiple_eval_configs:
+                    log(f"Config: {eval_config_name} ({eval_config_id})")
+                log("=" * 60)
+                log(f"Status: {grades.get('grading_run_status')}")
+                log(
+                    f"Final Score: {grades.get('scoring_results', {}).get('final_score')}"
+                )
+                for vr in grades.get("verifier_results", []):
+                    log(f"  - {vr.get('verifier_id')}: {vr.get('score')}")
 
     log("=" * 60)
     log("DONE")
