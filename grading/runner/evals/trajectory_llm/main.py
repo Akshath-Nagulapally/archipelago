@@ -1,4 +1,10 @@
-"""LLM judge eval for grading agent trajectories."""
+# LLM judge eval for grading agent trajectories.
+#
+# Loosely inspired by:
+# 1. AgentRewardBench: LLM judge over web-agent trajectories with structured
+#    criteria for success, side effects, repetitiveness, and rubric reliability.
+# 2. TRAJECT-Bench: trajectory-aware evaluation that scores full tool-use
+#    trajectories, not just final answers.
 
 import json
 from html import escape
@@ -18,27 +24,45 @@ from ..output_llm.utils.log_helpers import (
     log_grader_result,
     log_grader_start,
 )
-from ..output_llm.utils.prompts import (
-    JSON_OUTPUT_GRADING,
-    RATIONALE_FORMAT_BASIC,
-    STRICT_CRITERION_MATCHING,
-    TOLERANCE_NOTES,
-)
 from ..output_llm.utils.shared import (
     LLM_JUDGE_TIMEOUT,
     MAX_JSON_RETRIES,
     extract_task_prompt,
 )
+from .models import (
+    TrajectoryFailureType,
+    TrajectoryJudgeResponse,
+    compute_overall_score,
+    normalize_overall_score,
+)
 
 TRAJECTORY_GRADING_SYSTEM_PROMPT = "\n\n".join(
     [
-        "You are grading an agent trajectory against a single verification criterion.",
-        "Use the final answer as the primary evidence and the recent trajectory history as supporting context.",
-        "If the final answer or recent trajectory does not provide enough evidence to confidently verify the criterion, return false.",
-        STRICT_CRITERION_MATCHING,
-        TOLERANCE_NOTES,
-        RATIONALE_FORMAT_BASIC,
-        JSON_OUTPUT_GRADING,
+        # Define the judge role and force trajectory-level evaluation rather than final-answer-only grading.
+        "You are an expert web-agent trajectory evaluator.",
+        "Read the original task, formal criteria, final answer, and step-by-step trajectory. Evaluate the whole trajectory, not only the final answer.",
+        "<RUBRIC>",
+        "Score each dimension from 1 to 5.",
+        "- success_score: 5 means the task is fully completed; 3 means partially completed with important gaps; 1 means no meaningful completion.",
+        "- side_effect_score: 5 means no harmful or irrelevant side effects; 3 means minor unnecessary changes/actions; 1 means severe unintended side effects.",
+        "- efficiency_score: 5 means direct and economical action use; 3 means some redundancy; 1 means repeated loops or wasteful wandering.",
+        "- instruction_adherence_score: 5 means all explicit instructions and constraints were followed; 3 means some missed or ambiguous adherence; 1 means major instruction violations.",
+        "</RUBRIC>",
+        "<FAILURE_TYPES>",
+        ", ".join(failure_type.value for failure_type in TrajectoryFailureType),
+        "</FAILURE_TYPES>",
+        "<OUTPUT_SCHEMA>",
+        "Return ONLY a JSON object with these fields:",
+        "- success_score: integer 1-5",
+        "- side_effect_score: integer 1-5",
+        "- efficiency_score: integer 1-5",
+        "- instruction_adherence_score: integer 1-5",
+        "- failure_type: one of the FAILURE_TYPES values; use none when there is no meaningful failure",
+        "- failure_step_idx: integer message index from the trajectory, or null if no single step is responsible",
+        "- critical_step_idxs: list of integer message indices that materially affected the grade",
+        "- rationale: concise evidence-based explanation",
+        "Do not include overall_score. The grading system computes it deterministically from the dimension scores.",
+        "</OUTPUT_SCHEMA>",
     ]
 )
 
@@ -46,22 +70,23 @@ DEFAULT_MAX_MESSAGES = 12
 DEFAULT_MAX_CHARS = 12_000
 MAX_SINGLE_MESSAGE_CHARS = 2_000
 MAX_TOOL_ARGUMENT_CHARS = 2_000
+RAW_RESPONSE_PREVIEW_CHARS = 500
 
 
 def _xml_attr(value: Any) -> str:
-    """Escape a value for use in XML-style prompt attributes."""
+    # Escape a value for use in XML-style prompt attributes.
     return escape(str(value), quote=True)
 
 
 def _get_message_value(message: Any, key: str, default: Any = None) -> Any:
-    """Read a key from either dict-like or pydantic message objects."""
+    # Read a key from either dict-like or pydantic message objects.
     if isinstance(message, dict):
         return message.get(key, default)
     return getattr(message, key, default)
 
 
 def _normalize_content(content: Any) -> str:
-    """Convert heterogeneous message content into a compact string."""
+    # Collapse LiteLLM text/image blocks into one judge-readable content string.
     if content is None:
         return ""
     if isinstance(content, str):
@@ -88,14 +113,14 @@ def _normalize_content(content: Any) -> str:
 
 
 def _truncate_text(text: str, max_chars: int) -> str:
-    """Truncate prompt text with an explicit marker."""
+    # Truncate prompt text with an explicit marker.
     if len(text) <= max_chars:
         return text
     return f"{text[:max_chars]}...[truncated]"
 
 
 def _format_tool_arguments(arguments: Any) -> str:
-    """Render tool arguments in a stable, readable form for the judge."""
+    # Prefer canonical JSON so repeated tool calls are easy to compare in the prompt.
     if arguments is None:
         return "{}"
 
@@ -115,7 +140,7 @@ def _format_tool_arguments(arguments: Any) -> str:
 
 
 def _format_tool_call(tool_call: Any, call_index: int) -> str:
-    """Format an assistant tool call with its name and arguments."""
+    # Preserve tool name, id, and args so the judge can connect actions to later outputs.
     function = _get_message_value(tool_call, "function", {})
     tool_name = _get_message_value(function, "name", "unknown")
     arguments = _format_tool_arguments(
@@ -135,7 +160,7 @@ def _format_tool_call(tool_call: Any, call_index: int) -> str:
 
 
 def _format_tool_calls(tool_calls: Any) -> str | None:
-    """Format all assistant tool calls, if present."""
+    # Format all assistant tool calls, if present.
     if not tool_calls:
         return None
 
@@ -150,7 +175,8 @@ def _format_tool_calls(tool_calls: Any) -> str | None:
 
 
 def _format_message(message: Any, message_index: int, reverse_index: int) -> str:
-    """Format one trajectory message for the grading prompt."""
+    # Attach both original and reverse indices: original indices are for judge citations,
+    # reverse indices explain why only recent messages may appear in the excerpt.
     role = str(_get_message_value(message, "role", "unknown"))
     name = _get_message_value(message, "name")
     tool_call_id = _get_message_value(message, "tool_call_id")
@@ -166,6 +192,7 @@ def _format_message(message: Any, message_index: int, reverse_index: int) -> str
     if tool_call_id:
         lines.append(f"<TOOL_CALL_ID>{tool_call_id}</TOOL_CALL_ID>")
 
+    # Assistant messages can contain proposed tool calls before the matching tool output.
     formatted_tool_calls = _format_tool_calls(tool_calls)
     if formatted_tool_calls:
         lines.append(formatted_tool_calls)
@@ -182,17 +209,12 @@ def _build_trajectory_excerpt(
     max_messages: int,
     max_chars: int,
 ) -> tuple[str, int]:
-    """
-    Build a backward-scanned trajectory excerpt while preserving chronological order.
-
-    We walk from the back of the trajectory for efficiency, then reverse the selected
-    slice so the judge sees the retained messages in their original order.
-    """
     selected: list[str] = []
     total_chars = 0
 
     message_count = len(messages)
 
+    # Scan backward to retain the most recent evidence, then restore chronological order.
     for reverse_index, message in enumerate(reversed(messages), start=1):
         if len(selected) >= max_messages:
             break
@@ -220,33 +242,107 @@ def _build_trajectory_prompt(
     final_answer: str,
     trajectory_excerpt: str,
     criteria: str,
+    criteria_explanation: str | None = None,
 ) -> str:
     task_section = ""
     if task_prompt:
         task_section = f"<ORIGINAL_TASK>\n{task_prompt}\n</ORIGINAL_TASK>\n\n"
 
+    criteria_explanation_section = ""
+    if criteria_explanation:
+        criteria_explanation_section = (
+            f"<CRITERIA_EXPLANATION>\n{criteria_explanation}\n</CRITERIA_EXPLANATION>\n\n"
+        )
+
     final_answer_section = final_answer or "(No final answer provided)"
     history_section = trajectory_excerpt or "(No trajectory history provided)"
 
+    # Keep the prompt sections explicit so the judge can separate task, criteria, and evidence.
     return (
         f"{task_section}"
         f"<FINAL_ANSWER>\n{final_answer_section}\n</FINAL_ANSWER>\n\n"
-        f"<RECENT_TRAJECTORY>\n{history_section}\n</RECENT_TRAJECTORY>\n\n"
         f"<VERIFICATION_CRITERIA>\n{criteria}\n</VERIFICATION_CRITERIA>\n\n"
+        f"{criteria_explanation_section}"
+        f"<TRAJECTORY>\n{history_section}\n</TRAJECTORY>\n\n"
         "<REMINDER>\n"
-        "- Start with the FINAL_ANSWER.\n"
-        "- Use RECENT_TRAJECTORY only as supporting evidence.\n"
-        "- If the criterion is not clearly supported, return false.\n"
-        "- Return JSON with rationale and is_criteria_true.\n"
+        "- Evaluate the whole trajectory against the task and criteria.\n"
+        "- Use MESSAGE index values when identifying failure_step_idx or critical_step_idxs.\n"
+        "- Return only JSON matching the schema from the system instructions.\n"
         "</REMINDER>"
     )
 
 
+def _parse_trajectory_judge_response(raw_content: str) -> TrajectoryJudgeResponse:
+    # Normalize small provider differences before handing off to the typed schema.
+    raw_json = json.loads(_extract_json_object(raw_content))
+    if not isinstance(raw_json, dict):
+        raise ValueError("Trajectory judge response must be a JSON object")
+    if isinstance(raw_json.get("rationale"), dict):
+        raw_json["rationale"] = json.dumps(raw_json["rationale"])
+    if raw_json.get("critical_step_idxs") is None:
+        raw_json["critical_step_idxs"] = []
+
+    return TrajectoryJudgeResponse.model_validate(raw_json)
+
+
+def _extract_json_object(raw_content: str) -> str:
+    # Some providers still wrap JSON in Markdown fences despite response_format hints.
+    content = raw_content.strip()
+    if content.startswith("```"):
+        lines = content.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        content = "\n".join(lines).strip()
+
+    if content.startswith("{") and content.endswith("}"):
+        return content
+
+    # Fall back to the outermost JSON-looking object when the model adds prose.
+    start = content.find("{")
+    end = content.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        return content[start : end + 1]
+
+    return content
+
+
+def _preview_raw_response(raw_content: str | None) -> str:
+    # Compact raw model output for retry logs without flooding grading logs.
+    if not raw_content:
+        return "(empty)"
+    preview = raw_content.replace("\n", "\\n")
+    return _truncate_text(preview, RAW_RESPONSE_PREVIEW_CHARS)
+
+
+def _build_verifier_result_values(
+    judge_response: TrajectoryJudgeResponse,
+    *,
+    overall_score: int,
+    evaluated_message_count: int,
+) -> dict[str, Any]:
+    # Preserve legacy display fields while exposing the full trajectory rubric breakdown.
+    return {
+        "judge_grade": "pass" if overall_score >= 4 else "fail",
+        "grade_rationale": judge_response.rationale,
+        "success_score": judge_response.success_score,
+        "side_effect_score": judge_response.side_effect_score,
+        "efficiency_score": judge_response.efficiency_score,
+        "instruction_adherence_score": judge_response.instruction_adherence_score,
+        "overall_score": overall_score,
+        "failure_type": judge_response.failure_type.value,
+        "failure_step_idx": judge_response.failure_step_idx,
+        "critical_step_idxs": judge_response.critical_step_idxs,
+        "evaluated_message_count": evaluated_message_count,
+    }
+
+
 async def trajectory_llm_eval(input: EvalImplInput) -> VerifierResult:
-    """Grade agent trajectory messages against a criterion using an LLM judge."""
     verifier_values = input.verifier.verifier_values or {}
     task_id = input.verifier.task_id or "unknown"
     criteria = verifier_values.get("criteria", "")
+    criteria_explanation = verifier_values.get("criteria_explanation")
 
     log_grader_start(task_id, criteria, is_negative=False)
 
@@ -257,15 +353,19 @@ async def trajectory_llm_eval(input: EvalImplInput) -> VerifierResult:
         if not input.helper_results:
             raise ValueError("Missing helper results")
 
-        # Re-use final answer and widen into trajectory as needed.
+        # Gather shared grading context and bounded trajectory evidence.
         final_answer = str(input.helper_results.get(HelperIds.FINAL_ANSWER, "") or "")
         model = input.grading_settings.llm_judge_model
         extra_args = input.grading_settings.llm_judge_extra_args
         task_prompt = extract_task_prompt(input)
 
         eval_config_values = input.eval_config.eval_config_values or {}
-        max_messages = int(eval_config_values.get("trajectory_max_messages", DEFAULT_MAX_MESSAGES))
-        max_chars = int(eval_config_values.get("trajectory_max_chars", DEFAULT_MAX_CHARS))
+        max_messages = int(
+            eval_config_values.get("trajectory_max_messages", DEFAULT_MAX_MESSAGES)
+        )
+        max_chars = int(
+            eval_config_values.get("trajectory_max_chars", DEFAULT_MAX_CHARS)
+        )
 
         # Iterate from the back and judge against a bounded recent excerpt.
         trajectory_excerpt, evaluated_message_count = _build_trajectory_excerpt(
@@ -279,6 +379,7 @@ async def trajectory_llm_eval(input: EvalImplInput) -> VerifierResult:
             final_answer=final_answer,
             trajectory_excerpt=trajectory_excerpt,
             criteria=criteria,
+            criteria_explanation=criteria_explanation,
         )
 
         log_grader_final_prompt(
@@ -316,33 +417,39 @@ async def trajectory_llm_eval(input: EvalImplInput) -> VerifierResult:
             )
 
             choices = response.choices
-            if not choices or not isinstance(choices[0], Choices):
+            if not choices:
                 logger.warning(
                     f"[JUDGE][TRAJECTORY] JSON retry {attempt + 1}/{MAX_JSON_RETRIES}: empty response"
                 )
                 continue
 
-            raw_content = choices[0].message.content
+            choice = choices[0]
+            if not isinstance(choice, Choices):
+                logger.warning(
+                    f"[JUDGE][TRAJECTORY] JSON retry {attempt + 1}/{MAX_JSON_RETRIES}: unexpected choice type={type(choice).__name__}"
+                )
+
+            message = _get_message_value(choice, "message", {})
+            raw_content = _get_message_value(message, "content")
             if not raw_content:
                 logger.warning(
                     f"[JUDGE][TRAJECTORY] JSON retry {attempt + 1}/{MAX_JSON_RETRIES}: empty content"
                 )
                 continue
 
+            # Retry on malformed or schema-invalid JSON; the prompt is fixed between attempts.
             try:
-                parsed = json.loads(raw_content)
-                if isinstance(parsed.get("rationale"), dict):
-                    parsed["rationale"] = json.dumps(parsed["rationale"])
-                rationale = str(parsed["rationale"])
-                is_criteria_true = bool(parsed["is_criteria_true"])
-                parsed = {
-                    "rationale": rationale,
-                    "is_criteria_true": is_criteria_true,
-                }
+                parsed = _parse_trajectory_judge_response(raw_content)
                 break
-            except (json.JSONDecodeError, KeyError, TypeError, ValidationError) as e:
+            except (
+                json.JSONDecodeError,
+                KeyError,
+                TypeError,
+                ValueError,
+                ValidationError,
+            ) as e:
                 logger.warning(
-                    f"[JUDGE][TRAJECTORY] JSON retry {attempt + 1}/{MAX_JSON_RETRIES}: {e}"
+                    f"[JUDGE][TRAJECTORY] JSON retry {attempt + 1}/{MAX_JSON_RETRIES}: {e} | raw={_preview_raw_response(raw_content)}"
                 )
                 parsed = None
                 continue
@@ -350,15 +457,15 @@ async def trajectory_llm_eval(input: EvalImplInput) -> VerifierResult:
         if parsed is None:
             raise ValueError(f"Invalid JSON after {MAX_JSON_RETRIES} attempts")
 
-        is_criteria_true = parsed["is_criteria_true"]
-        rationale = parsed["rationale"]
-        judge_grade = "pass" if is_criteria_true else "fail"
-        score = 1.0 if is_criteria_true else 0.0
+        # Apply deterministic grading policy after the LLM has scored each dimension.
+        overall_score = compute_overall_score(parsed)
+        score = normalize_overall_score(overall_score)
+        passed = overall_score >= 4
 
         log_grader_result(
             task_id,
             is_negative=False,
-            passed=is_criteria_true,
+            passed=passed,
             score=score,
             criteria=criteria,
         )
@@ -367,11 +474,11 @@ async def trajectory_llm_eval(input: EvalImplInput) -> VerifierResult:
             verifier_id=input.verifier.verifier_id,
             verifier_version=input.verifier.verifier_version,
             score=score,
-            verifier_result_values={
-                "judge_grade": judge_grade,
-                "grade_rationale": rationale,
-                "evaluated_message_count": evaluated_message_count,
-            },
+            verifier_result_values=_build_verifier_result_values(
+                parsed,
+                overall_score=overall_score,
+                evaluated_message_count=evaluated_message_count,
+            ),
         )
 
     except Exception as e:
