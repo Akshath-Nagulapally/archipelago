@@ -2,6 +2,14 @@
 
 The Code Execution Agent is a first-pass hybrid agent that combines the current ReAct toolbelt loop with an explicit Python runtime contract.
 
+## Inspiration
+
+This agent direction is informed by:
+
+- Anthropic, "Code execution with MCP: Building more efficient agents" (Nov 4, 2025): https://www.anthropic.com/engineering/code-execution-with-mcp
+
+The core idea we are borrowing is to make code the composition layer for MCP workflows, so the model can keep large intermediate state inside the execution environment rather than bouncing every tool result through the LLM context window.
+
 ## What it does
 
 - Inherits the ReAct agent's planning, explicit `final_answer`, and dynamic toolbelt behavior
