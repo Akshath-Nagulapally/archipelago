@@ -169,8 +169,9 @@ The agent runner requires several configuration files. Here's how to create them
 ```
 
 Available agent IDs:
+- `code_execution_agent` - ReAct + code execution workspace contract for Python-first orchestration
 - `loop_agent` - Basic tool-calling loop
-- `toolbelt_agent` - Dynamic tool selection
+- `react_toolbelt_agent` - Dynamic tool selection with planning and summarization
 - `singleshot_agent` - Single LLM call (no tools)
 
 **3. Run the agent:**

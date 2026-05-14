@@ -46,6 +46,7 @@ def get_msg_attr(msg: LitellmAnyMessage, key: str, default: Any = None) -> Any:
 class AgentConfigIds(StrEnum):
     """Registry of available agent implementation IDs (e.g., 'loop_agent')."""
 
+    CODE_EXECUTION_AGENT = "code_execution_agent"
     LOOP_AGENT = "loop_agent"
     REACT_TOOLBELT_AGENT = "react_toolbelt_agent"
 

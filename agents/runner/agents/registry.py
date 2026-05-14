@@ -2,12 +2,37 @@
 Agent registry mapping agent IDs to their implementations and config schemas.
 """
 
+from runner.agents.code_execution_agent.main import run as code_execution_agent_run
 from runner.agents.loop_agent.main import run as loop_agent_run
 from runner.agents.models import AgentConfigIds, AgentDefn, AgentImpl
 from runner.agents.react_toolbelt_agent.main import run as react_toolbelt_agent_run
 from runner.models import TaskFieldSchema, TaskFieldType
 
 AGENT_REGISTRY: dict[AgentConfigIds, AgentDefn] = {
+    AgentConfigIds.CODE_EXECUTION_AGENT: AgentDefn(
+        agent_config_id=AgentConfigIds.CODE_EXECUTION_AGENT,
+        agent_impl=code_execution_agent_run,
+        agent_config_fields=[
+            TaskFieldSchema(
+                field_id="timeout",
+                field_type=TaskFieldType.NUMBER,
+                label="Timeout (seconds)",
+                description="Maximum time for agent execution",
+                default_value=10800,  # 3 hours
+                min_value=300,  # 5 minutes
+                max_value=28800,  # 8 hours
+            ),
+            TaskFieldSchema(
+                field_id="max_steps",
+                field_type=TaskFieldType.NUMBER,
+                label="Max Steps",
+                description="Maximum number of LLM calls before stopping",
+                default_value=250,
+                min_value=1,
+                max_value=1000,
+            ),
+        ],
+    ),
     AgentConfigIds.LOOP_AGENT: AgentDefn(
         agent_config_id=AgentConfigIds.LOOP_AGENT,
         agent_impl=loop_agent_run,
