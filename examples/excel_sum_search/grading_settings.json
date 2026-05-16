@@ -1,0 +1,4 @@
+{
+  "llm_judge_model": "openai/gpt-5.5",
+  "llm_judge_extra_args": null
+}
