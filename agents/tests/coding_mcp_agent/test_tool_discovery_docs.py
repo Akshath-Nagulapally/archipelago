@@ -45,8 +45,8 @@ def _fake_module(
         async def _stub(**kwargs):  # pragma: no cover — never invoked
             return None
 
-        _stub._mcp_tool = tool  # pyright: ignore[reportFunctionMemberAccess]
-        setattr(mod, fn_name, _stub)
+        _stub.__dict__["_mcp_tool"] = tool
+        mod.__dict__[fn_name] = _stub
     return mod
 
 

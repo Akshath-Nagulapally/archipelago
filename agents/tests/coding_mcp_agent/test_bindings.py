@@ -140,7 +140,7 @@ class TestRegisterToolOnModule:
 
         bindings._register_tool_on_module(mod, tool, "list_files", _fake_client())
 
-        attached = mod.list_files  # type: ignore[attr-defined]
+        attached = mod.__dict__["list_files"]
         assert callable(attached)
         assert attached.__name__ == "list_files"
         assert attached.__doc__ == "List files in a path"
@@ -159,10 +159,10 @@ class TestRegisterToolOnModule:
             mod, _fake_tool("filesystem_read"), "read", client
         )
 
-        await mod.list_files(path="/x")  # type: ignore[attr-defined]
+        await mod.__dict__["list_files"](path="/x")
         client.call_tool.assert_awaited_with("filesystem_list_files", {"path": "/x"})
 
-        await mod.read(path="/y")  # type: ignore[attr-defined]
+        await mod.__dict__["read"](path="/y")
         client.call_tool.assert_awaited_with("filesystem_read", {"path": "/y"})
 
     async def test_wrapper_unwraps_call_tool_result_to_first_text(self):
@@ -172,7 +172,7 @@ class TestRegisterToolOnModule:
 
         bindings._register_tool_on_module(mod, _fake_tool("ls"), "ls", client)
 
-        result = await mod.ls()  # type: ignore[attr-defined]
+        result = await mod.__dict__["ls"]()
         assert result == "hello world"
 
     async def test_wrapper_returns_empty_string_when_content_is_empty(self):
@@ -182,7 +182,7 @@ class TestRegisterToolOnModule:
 
         bindings._register_tool_on_module(mod, _fake_tool("ls"), "ls", client)
 
-        result = await mod.ls()  # type: ignore[attr-defined]
+        result = await mod.__dict__["ls"]()
         assert result == ""
 
     async def test_wrapper_does_not_leak_caller_kwargs_to_closure(self):
@@ -205,7 +205,7 @@ class TestRegisterToolOnModule:
         # closure-captured client, and `await "external".call_tool(...)` would
         # raise AttributeError. With the factory fix, they pass through as
         # ordinary kwargs forwarded to the real MCP tool.
-        await mod.some_tool(  # type: ignore[attr-defined]
+        await mod.__dict__["some_tool"](
             _client="external_service",
             _tool_name="not_real",
             real_arg="x",
