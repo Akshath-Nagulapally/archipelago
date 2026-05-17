@@ -13,10 +13,11 @@ The article above argues for a different design: present tools as **importable P
 
 ## What this PR implements: **bindings + progressive tool discovery**
 
-This branch lands two foundational pieces:
+This branch lands three foundational pieces:
 
 1. **Dynamic generation of Python modules that wrap MCP tools** — so agent code can call tools as regular Python functions.
 2. **Progressive tool discovery** — a filesystem-based knowledge tree the agent can browse incrementally instead of loading all tool schemas upfront.
+3. **Sandbox and Bash tools** — `execute_code` runs Python that imports those bindings; `execute_bash` lets the LLM explore the discovery tree (and run any shell command in the container).
 
 Once these are in place, agent code can do:
 
@@ -27,7 +28,7 @@ content = await filesystem_server.read_text_file(path="/data/report.txt")
 rows = await sheets_server.sheets(request={"action": "read_tab", "file_name": "..."})
 ```
 
-The remaining piece — the LLM-driven agent loop and code-execution sandbox — is deferred to a follow-up PR (see [Future Work](#future-work) below).
+The remaining piece — the LLM-driven agent loop that calls these tools — is deferred to a follow-up PR (see [Future Work](#future-work) below).
 
 ## How It Works
 
@@ -84,9 +85,35 @@ Parameters:
 
 The directory is recreated fresh on each agent startup. Because server and tool names must be valid Python identifiers (they are used as module attributes and `sys.modules` keys in the bindings layer), no path sanitization is needed.
 
-### 4. Probe-based smoke test
+### 4. Sandbox and Bash tools
 
-After bindings and docs are built, `runtime_probes.py` runs one cheap, side-effect-free tool call per server — verifying the full path (`GET /apps` → module generation → MCP gateway call → result unwrap) end-to-end. The probe to call is picked automatically by inspecting each tool's `inputSchema` (zero-required-args tool first, then a `*_schema` introspection tool as fallback). Failures are captured per-server so one misconfigured server doesn't mask the rest.
+The agent exposes two **local** tools to the LLM (implemented in `tools/bash.py` and `tools/sandbox.py`). Together they split the Anthropic article's workflow: bash to *discover* what MCP tools exist, sandbox to *call* them.
+
+**`execute_bash`** — run arbitrary shell commands via `/bin/sh -c` (pipes, redirects, etc. work as usual). The canonical use is reading the tool-discovery tree from §3:
+
+```
+execute_bash("cat /tmp/mcp-tool-docs/servers/_index.txt")
+execute_bash("cat /tmp/mcp-tool-docs/servers/sheets_server/add_row.txt")
+```
+
+There is no command allowlist or path restriction: the LLM is trusted-but-careless and the container is the isolation boundary. Stdin is wired to `/dev/null` so interactive prompts fail fast instead of hanging until the 60s timeout; when stderr looks like a closed-stdin failure, the result includes a `hint` nudging the model toward non-interactive flags. Returns `stdout`, `stderr`, `exit_code`, and optional `timed_out`.
+
+**`execute_code`** — run LLM-authored Python in the agent process. Code is wrapped as `async def __user_code__():` so top-level `await` works. Imports like `from servers import sheets_server` resolve through `sys.modules`, populated by the bindings layer at startup — the sandbox does not inject globals or proxy MCP calls. Each call is independent (no variables or functions persist across calls). Returns captured `stdout` (stderr is merged and labeled) and a full traceback on failure. Default timeout is 240s.
+
+Typical turn sequence once the agent loop lands:
+
+1. `execute_bash` — browse `/tmp/mcp-tool-docs` to learn server/tool names and signatures.
+2. `execute_code` — write Python that imports `servers.<name>` and chains MCP calls; only the printed result returns to the LLM context.
+
+Threat model for both tools: LLM-generated, not adversarial. No AST audit, no separate process isolation beyond the eval container.
+
+### 5. Probe-based smoke test
+
+After bindings and docs are built, `probes.py` runs three startup checks before the LLM loop is allowed to start (any failure raises and aborts initialization):
+
+1. **Remote MCP** — one cheap, side-effect-free tool call per server through the gateway (probe picked from `inputSchema`: zero-required-args tool first, then a `*_schema` introspection tool as fallback).
+2. **Sandbox imports** — `execute_code` can `from servers import <every-server>`.
+3. **Bash docs** — `execute_bash` can `cat` the root `_index.txt` of the tool-discovery tree.
 
 Adding a new MCP server requires **no changes** to this file.
 
@@ -94,5 +121,5 @@ Adding a new MCP server requires **no changes** to this file.
 
 The following pieces are intentionally **not** in this PR and will land in follow-ups:
 
-- **The agent loop itself.** This branch's `run()` returns `AgentStatus.ERROR` immediately after the smoke test — there is no LLM step yet. The loop will execute LLM-written Python via the `code_execution_server` in-process.
+- **The agent loop itself.** This branch's `run()` returns `AgentStatus.ERROR` immediately after the smoke test — there is no LLM step yet. The loop will drive `execute_bash` / `execute_code` each turn.
 - **Final-answer / planning tools.** `final_answer` (explicit termination) and `todo_write` (task planning), carried over from the ReAct agent, will be added alongside the loop.

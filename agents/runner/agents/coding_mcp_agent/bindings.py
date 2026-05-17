@@ -96,7 +96,7 @@ def _ensure_servers_namespace() -> types.ModuleType:
     pkg = sys.modules.get(SERVERS_NAMESPACE)
     if pkg is None:
         pkg = types.ModuleType(SERVERS_NAMESPACE)
-        pkg.__path__ = []  # type: ignore[attr-defined]
+        pkg.__dict__["__path__"] = []
         sys.modules[SERVERS_NAMESPACE] = pkg
     return pkg
 
@@ -181,8 +181,7 @@ def _register_tool_on_module(
     fn.__doc__ = tool.description
     # Attach the original Tool so consumers (e.g. runtime_probes) can
     # introspect inputSchema without re-fetching from the gateway.
-    # FunctionType doesn't declare arbitrary attributes, hence the ignore.
-    fn._mcp_tool = tool  # pyright: ignore[reportFunctionMemberAccess]
+    fn.__dict__["_mcp_tool"] = tool
     setattr(mod, fn_name, fn)
 
 
@@ -211,15 +210,11 @@ def _build_one_server_module(
 
     mod = types.ModuleType(f"{SERVERS_NAMESPACE}.{server_name}")
     for tool in server_tools:
-        fn_name = tool.name[len(prefix):] if strip_prefix else tool.name
+        fn_name = tool.name[len(prefix) :] if strip_prefix else tool.name
         _register_tool_on_module(mod, tool, fn_name, client)
 
     sys.modules[f"{SERVERS_NAMESPACE}.{server_name}"] = mod
     setattr(servers_pkg, server_name, mod)
-
-    logger.info(
-        f"Built module {SERVERS_NAMESPACE}.{server_name} with {len(server_tools)} tools"
-    )
     return mod
 
 
@@ -230,9 +225,9 @@ def get_bound_tools(mod: types.ModuleType) -> dict[str, Any]:
     `_register_tool_on_module` — so plain module attributes are ignored.
     """
     return {
-        name: fn._mcp_tool  # pyright: ignore[reportFunctionMemberAccess]
+        name: fn.__dict__["_mcp_tool"]
         for name, fn in vars(mod).items()
-        if hasattr(fn, "_mcp_tool")
+        if "_mcp_tool" in getattr(fn, "__dict__", {})
     }
 
 

@@ -82,6 +82,7 @@ AGENT_REGISTRY: dict[AgentConfigIds, AgentDefn] = {
     ),
 }
 
+
 def get_agent_impl(agent_config_id: str) -> AgentImpl:
     """
     Get the agent implementation function for the given agent config ID.
@@ -110,6 +111,7 @@ def get_agent_impl(agent_config_id: str) -> AgentImpl:
         )
 
     return defn.agent_impl
+
 
 def get_agent_defn(agent_config_id: str) -> AgentDefn:
     """
