@@ -23,6 +23,7 @@ from .state import (
     get_mcp_lifespan_manager,
     get_mcp_lock,
     get_mcp_mount,
+    set_mcp_config,
     set_mcp_lifespan_manager,
     set_mcp_mount,
 )
@@ -277,6 +278,7 @@ async def swap_mcp_app(config: MCPSchema, app: FastAPI) -> None:
                 _ = await old_lm.__aexit__(None, None, None)
 
             set_mcp_lifespan_manager(new_lm)
+            set_mcp_config(config)
 
             server_count = len(config.mcpServers)
             logger.info(

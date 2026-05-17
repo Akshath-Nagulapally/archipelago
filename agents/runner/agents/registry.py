@@ -2,6 +2,7 @@
 Agent registry mapping agent IDs to their implementations and config schemas.
 """
 
+from runner.agents.coding_mcp_agent.main import run as coding_mcp_agent_run
 from runner.agents.loop_agent.main import run as loop_agent_run
 from runner.agents.models import AgentConfigIds, AgentDefn, AgentImpl
 from runner.agents.react_toolbelt_agent.main import run as react_toolbelt_agent_run
@@ -49,6 +50,11 @@ AGENT_REGISTRY: dict[AgentConfigIds, AgentDefn] = {
                 max_value=1200,
             ),
         ],
+    ),
+    AgentConfigIds.CODING_MCP_AGENT: AgentDefn(
+        agent_config_id=AgentConfigIds.CODING_MCP_AGENT,
+        agent_impl=coding_mcp_agent_run,
+        agent_config_fields=[],
     ),
     AgentConfigIds.REACT_TOOLBELT_AGENT: AgentDefn(
         agent_config_id=AgentConfigIds.REACT_TOOLBELT_AGENT,
