@@ -43,7 +43,7 @@ Each wrapped tool function also unwraps fastmcp's `CallToolResult.content[0].tex
 
 ### 3. Probe-based smoke test
 
-After bindings are built, `binding_test.py` runs one cheap, side-effect-free tool call per server through the binding — this verifies the full path (`GET /apps` → module generation → MCP gateway call → result unwrap) is wired end-to-end. Failures are captured per-server so one misconfigured server doesn't mask the rest.
+After bindings are built, `runtime_probes.py` runs one cheap, side-effect-free tool call per server through the binding — this verifies the full path (`GET /apps` → module generation → MCP gateway call → result unwrap) is wired end-to-end. The probe to call is picked automatically by inspecting each tool's `inputSchema` (zero-required-args tool first, then a `*_schema` introspection tool as fallback). Failures are captured per-server so one misconfigured server doesn't mask the rest.
 
 Adding a new MCP server only requires registering one entry in the `PROBES` dict.
 

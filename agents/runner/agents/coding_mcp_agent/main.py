@@ -18,12 +18,17 @@ from __future__ import annotations
 
 import time
 import types
+from typing import Any
 
 from fastmcp import Client
+from fastmcp.client.transports import MCPConfigTransport
 from loguru import logger
 
-from runner.agents.coding_mcp_agent import binding_test
-from runner.agents.coding_mcp_agent.bindings import build_server_modules, make_client
+from runner.agents.coding_mcp_agent import runtime_probes
+from runner.agents.coding_mcp_agent.bindings import (
+    build_server_modules,
+    make_client,
+)
 from runner.agents.models import (
     AgentRunInput,
     AgentStatus,
@@ -32,6 +37,24 @@ from runner.agents.models import (
 
 
 class CodingMCPAgent:
+    # Class-level annotations so basedpyright knows the attribute types
+    # without requiring `@final` on the class. The actual values are bound
+    # in __init__.
+    gateway_url: str
+    trajectory_id: str
+    model: str
+    initial_messages: list[Any]
+    config: dict[str, Any]
+    start_time: float | None
+    modules: dict[str, types.ModuleType]
+    # MCP client lifecycle.
+    # _client_cm: the un-entered context manager (always set in initialize)
+    # _client:    the entered client, used for every tool call. Set only
+    #             after a successful __aenter__, so `close()` can tell
+    #             whether there's anything to tear down.
+    _client_cm: Client[MCPConfigTransport] | None
+    _client: Client[MCPConfigTransport] | None
+
     def __init__(self, run_input: AgentRunInput):
         if run_input.mcp_gateway_url is None:
             raise ValueError("CodingMCPAgent requires an MCP gateway URL")
@@ -41,16 +64,10 @@ class CodingMCPAgent:
         self.model = run_input.orchestrator_model
         self.initial_messages = run_input.initial_messages
         self.config = run_input.agent_config_values
-        self.start_time: float | None = None
-        self.modules: dict[str, types.ModuleType] = {}
-
-        # MCP client lifecycle.
-        # _client_cm: the un-entered context manager (always set in initialize)
-        # _client:    the entered client, used for every tool call. Set only
-        #             after a successful __aenter__, so `close()` can tell
-        #             whether there's anything to tear down.
-        self._client_cm: Client | None = None
-        self._client: Client | None = None
+        self.start_time = None
+        self.modules = {}
+        self._client_cm = None
+        self._client = None
 
     async def initialize(self) -> None:
         """Open the shared MCP client, build bindings, and probe each server.
@@ -74,8 +91,8 @@ class CodingMCPAgent:
 
         logger.info(f"Modules ready: {list(self.modules.keys())}")
 
-        report = await binding_test.run_binding_tests(self.modules)
-        logger.info(f"Binding test report: {report}")
+        report = await runtime_probes.run_runtime_probes(self.modules)
+        logger.info(f"Runtime probe report: {report}")
 
     async def close(self) -> None:
         """Close the shared MCP client, if it was successfully opened.
