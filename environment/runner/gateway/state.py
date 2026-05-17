@@ -5,14 +5,19 @@ including the mount reference, lifespan manager, and concurrency lock.
 """
 
 import asyncio
+from typing import TYPE_CHECKING
 
 from asgi_lifespan import LifespanManager
 from starlette.routing import Mount
+
+if TYPE_CHECKING:
+    from .models import MCPSchema
 
 # Global state for MCP mount and lifespan manager
 _mcp_mount: Mount | None = None
 _mcp_lifespan_manager: LifespanManager | None = None
 _mcp_lock: asyncio.Lock = asyncio.Lock()
+_mcp_config: "MCPSchema | None" = None
 
 
 def get_mcp_mount() -> Mount | None:
@@ -40,3 +45,14 @@ def set_mcp_lifespan_manager(manager: LifespanManager | None) -> None:
 def get_mcp_lock() -> asyncio.Lock:
     """Get the MCP swap lock."""
     return _mcp_lock
+
+
+def get_mcp_config() -> "MCPSchema | None":
+    """Get the currently active MCP configuration."""
+    return _mcp_config
+
+
+def set_mcp_config(config: "MCPSchema") -> None:
+    """Store the active MCP configuration."""
+    global _mcp_config
+    _mcp_config = config

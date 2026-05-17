@@ -11,8 +11,23 @@ from loguru import logger
 
 from .gateway import MCPReadinessError, swap_mcp_app
 from .models import AppConfigRequest, AppConfigResult
+from .state import get_mcp_config
 
 router = APIRouter()
+
+
+@router.get("/apps")
+async def get_apps() -> dict:
+    """Return the currently active MCP server names.
+
+    Used by agents to discover server names for module binding — avoids
+    inferring server names from tool name prefixes, which breaks for
+    multi-word server names like 'filesystem_server'.
+    """
+    config = get_mcp_config()
+    if config is None:
+        return {"servers": []}
+    return {"servers": list(config.mcpServers.keys())}
 
 
 @router.post("/apps", response_model=AppConfigResult)
