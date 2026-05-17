@@ -216,10 +216,6 @@ def _build_one_server_module(
 
     sys.modules[f"{SERVERS_NAMESPACE}.{server_name}"] = mod
     setattr(servers_pkg, server_name, mod)
-
-    logger.info(
-        f"Built module {SERVERS_NAMESPACE}.{server_name} with {len(server_tools)} tools"
-    )
     return mod
 
 

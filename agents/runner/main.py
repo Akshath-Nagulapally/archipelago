@@ -5,6 +5,8 @@ Main orchestrator for running agents.
 import argparse
 import asyncio
 import json
+import sys
+import time
 from typing import Any, cast
 
 from loguru import logger
@@ -65,8 +67,11 @@ async def main(
     )
 
     with logger.contextualize(trajectory_id=trajectory_id):
-        logger.info(
-            f"Running model {orchestrator_model} with agent {agent_config.agent_name}"
+        print(
+            f"[{time.strftime('%H:%M:%S')}] Running model {orchestrator_model}"
+            f" with agent {agent_config.agent_name}",
+            flush=True,
+            file=sys.stdout,
         )
 
         try:

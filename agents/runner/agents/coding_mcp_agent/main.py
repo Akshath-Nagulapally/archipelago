@@ -81,12 +81,11 @@ class CodingMCPAgent:
         which captures it inside every binding wrapper. Subsequent tool calls
         all reuse this same session — avoiding per-call MCP handshake overhead.
         """
-        logger.info("Opening MCP client to gateway...")
+        _harness_log("Opening MCP client to gateway...")
         self._client_cm = make_client(self.gateway_url)
         # If __aenter__ raises, self._client stays None and close() is a no-op.
         self._client = await self._client_cm.__aenter__()
 
-        logger.info("Building MCP server modules from gateway...")
         self.modules = await build_server_modules(self.gateway_url, self._client)
 
         if not self.modules:
@@ -99,9 +98,7 @@ class CodingMCPAgent:
             f"{list(self.modules.keys())}"
         )
 
-        logger.info("Building tool discovery docs directory...")
         self.tool_docs_path = build_tool_docs_dir(self.modules)
-        logger.debug(f"Tool docs written to: {self.tool_docs_path}")
         _print_tool_docs_tree(self.tool_docs_path)
 
         # Probes are strict: any failure here raises and stops the agent
