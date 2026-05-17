@@ -40,6 +40,9 @@ from typing import Any
 
 from loguru import logger
 
+from runner.agents.coding_mcp_agent.bindings import get_bound_tools
+from runner.agents.coding_mcp_agent.utils import parse_input_schema
+
 # A no-args tool (Strategy 1) is called with this payload.
 _NO_ARGS: dict[str, Any] = {}
 
@@ -47,27 +50,10 @@ _NO_ARGS: dict[str, Any] = {}
 _SCHEMA_PROBE_ARGS: dict[str, Any] = {"request": {"model": "input"}}
 
 
-def _bound_tools(mod: types.ModuleType) -> dict[str, Any]:
-    """Return the {fn_name: mcp.types.Tool} attached by `_register_tool_on_module`.
-
-    Skips dunder attributes and anything that doesn't have a `_mcp_tool`
-    attribute (i.e., it wasn't put there by the binding generator).
-    """
-    bound: dict[str, Any] = {}
-    for attr_name in dir(mod):
-        if attr_name.startswith("_"):
-            continue
-        fn = getattr(mod, attr_name)
-        tool = getattr(fn, "_mcp_tool", None)
-        if tool is not None:
-            bound[attr_name] = tool
-    return bound
-
 
 def _required_args(tool: Any) -> list[str]:
     """Get the list of required argument names from a tool's inputSchema."""
-    schema = getattr(tool, "inputSchema", None) or {}
-    required = schema.get("required", []) or []
+    _, required = parse_input_schema(tool)
     return list(required)
 
 
@@ -78,7 +64,7 @@ def _pick_probe(
 
     See module docstring for the two strategies.
     """
-    bound = _bound_tools(mod)
+    bound = get_bound_tools(mod)
     if not bound:
         return None
 
