@@ -180,7 +180,9 @@ def _print_tool_docs_tree(root: str | None) -> None:
         for fname in sorted(filenames):
             lines.append(f"{subindent}{fname}")
     tree = "\n".join(lines)
-    _harness_log(f"Tool Discovery Docs Successfully Generated. Structured as follows:\n{tree}")
+    _harness_log(
+        f"Tool Discovery Docs Successfully Generated. Structured as follows:\n{tree}"
+    )
 
 
 async def run(run_input: AgentRunInput) -> AgentTrajectoryOutput:

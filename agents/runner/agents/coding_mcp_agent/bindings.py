@@ -211,7 +211,7 @@ def _build_one_server_module(
 
     mod = types.ModuleType(f"{SERVERS_NAMESPACE}.{server_name}")
     for tool in server_tools:
-        fn_name = tool.name[len(prefix):] if strip_prefix else tool.name
+        fn_name = tool.name[len(prefix) :] if strip_prefix else tool.name
         _register_tool_on_module(mod, tool, fn_name, client)
 
     sys.modules[f"{SERVERS_NAMESPACE}.{server_name}"] = mod

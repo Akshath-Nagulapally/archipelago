@@ -35,12 +35,16 @@ def _fake_tool(
     )
 
 
-def _fake_module(server_name: str, tools: dict[str, SimpleNamespace]) -> types.ModuleType:
+def _fake_module(
+    server_name: str, tools: dict[str, SimpleNamespace]
+) -> types.ModuleType:
     """Build a fake `servers.<name>` module with `_mcp_tool`-tagged async fns."""
     mod = types.ModuleType(f"servers.{server_name}")
     for fn_name, tool in tools.items():
+
         async def _stub(**kwargs):  # pragma: no cover — never invoked
             return None
+
         _stub._mcp_tool = tool  # pyright: ignore[reportFunctionMemberAccess]
         setattr(mod, fn_name, _stub)
     return mod
@@ -78,9 +82,7 @@ class TestBuildToolDocsDir:
         assert server_dir.is_dir()
         assert (server_dir / "add_row.txt").is_file()
         assert "add_row: Add a row to a tab" in (server_dir / "_index.txt").read_text()
-        assert "sheets_server: 1 tools" in (
-            path / "servers" / "_index.txt"
-        ).read_text()
+        assert "sheets_server: 1 tools" in (path / "servers" / "_index.txt").read_text()
 
     def test_multiple_servers_dont_cross_contaminate(self):
         """Tools from server A never end up under server B's directory."""
@@ -126,7 +128,7 @@ class TestBuildToolDocsDir:
         """Only `_mcp_tool`-tagged attrs become docs files."""
         mod = _fake_module("svr", {"real_tool": _fake_tool(description="real")})
         # Add a plain attribute with no `_mcp_tool` marker — must be filtered.
-        setattr(mod, "unrelated_helper", lambda: None)
+        mod.__dict__["unrelated_helper"] = lambda: None
 
         path = Path(build_tool_docs_dir({"svr": mod}))
 

@@ -42,6 +42,7 @@ dev = [
     "testcontainers>=4.6.1",
     "types-aioboto3>=15.2.0",
     "types-aiobotocore-sqs>=2.24.3",
+    "radon>=6.0.1",
 ]
 
 [tool.basedpyright]

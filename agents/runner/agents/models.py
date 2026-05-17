@@ -25,11 +25,13 @@ LitellmAnyMessage = (
     LitellmInputMessage | LitellmResponsesInputMessage | LitellmOutputMessage
 )
 
+
 def get_msg_role(msg: LitellmAnyMessage) -> str:
     """Get role from either TypedDict or Pydantic Message."""
     if isinstance(msg, Message):
         return msg.role
     return msg["role"]
+
 
 def get_msg_content(msg: LitellmAnyMessage) -> Any:
     """Get content from either TypedDict or Pydantic Message."""
@@ -37,11 +39,13 @@ def get_msg_content(msg: LitellmAnyMessage) -> Any:
         return msg.content
     return msg.get("content")
 
+
 def get_msg_attr(msg: LitellmAnyMessage, key: str, default: Any = None) -> Any:
     """Get arbitrary attribute from either TypedDict or Pydantic Message."""
     if isinstance(msg, Message):
         return getattr(msg, key, default)
     return msg.get(key, default)
+
 
 class AgentConfigIds(StrEnum):
     """Registry of available agent implementation IDs (e.g., 'loop_agent')."""
@@ -49,6 +53,7 @@ class AgentConfigIds(StrEnum):
     LOOP_AGENT = "loop_agent"
     REACT_TOOLBELT_AGENT = "react_toolbelt_agent"
     CODING_MCP_AGENT = "coding_mcp_agent"
+
 
 class AgentStatus(StrEnum):
     """Status of an agent run."""
@@ -59,6 +64,7 @@ class AgentStatus(StrEnum):
     CANCELLED = "cancelled"
     FAILED = "failed"
     ERROR = "error"
+
 
 class AgentRunInput(BaseModel):
     """Input to an agent implementation."""
@@ -82,6 +88,7 @@ class AgentRunInput(BaseModel):
     # Arbitrary per-trajectory metadata from the orchestration request
     custom_args: dict[str, Any] | None = None
 
+
 class AgentTrajectoryOutput(BaseModel):
     """Output from an agent run"""
 
@@ -91,7 +98,9 @@ class AgentTrajectoryOutput(BaseModel):
     time_elapsed: float
     usage: dict[str, int] | None = None
 
+
 AgentImpl = Callable[[AgentRunInput], Awaitable[AgentTrajectoryOutput]]
+
 
 class AgentDefn(BaseModel):
     """Definition of an agent implementation in the registry."""

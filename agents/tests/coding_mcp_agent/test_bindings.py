@@ -357,11 +357,12 @@ class TestGetBoundTools:
 
         async def fn_a(): ...
         async def fn_b(): ...
-        fn_a._mcp_tool = tool_a  # pyright: ignore[reportFunctionMemberAccess]
-        fn_b._mcp_tool = tool_b  # pyright: ignore[reportFunctionMemberAccess]
 
-        setattr(mod, "fn_a", fn_a)
-        setattr(mod, "fn_b", fn_b)
+        fn_a.__dict__["_mcp_tool"] = tool_a
+        fn_b.__dict__["_mcp_tool"] = tool_b
+
+        mod.__dict__["fn_a"] = fn_a
+        mod.__dict__["fn_b"] = fn_b
 
         result = bindings.get_bound_tools(mod)
         assert result == {"fn_a": tool_a, "fn_b": tool_b}
@@ -369,8 +370,8 @@ class TestGetBoundTools:
     def test_untagged_attrs_are_excluded(self):
         """Plain module attrs without _mcp_tool are filtered out."""
         mod = types_module.ModuleType("servers.fake")
-        setattr(mod, "helper", lambda: None)
-        setattr(mod, "CONSTANT", 42)
+        mod.__dict__["helper"] = lambda: None
+        mod.__dict__["CONSTANT"] = 42
 
         result = bindings.get_bound_tools(mod)
         assert result == {}
