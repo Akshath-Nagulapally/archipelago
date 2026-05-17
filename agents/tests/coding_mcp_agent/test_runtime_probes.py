@@ -101,7 +101,7 @@ class TestPickProbe:
         # Plain attribute, no marker — should be ignored.
         async def unrelated_helper():
             return "noop"
-        mod.unrelated_helper = unrelated_helper  # type: ignore[attr-defined]
+        setattr(mod, "unrelated_helper", unrelated_helper)
 
         choice = runtime_probes._pick_probe(mod)
 
@@ -130,8 +130,8 @@ class TestRunRuntimeProbes:
         """A probe that raises → `"failed: <ExcType>: <msg>"`, no propagation."""
         mod = types.ModuleType("servers.fake")
         binding = AsyncMock(side_effect=RuntimeError("boom"))
-        binding._mcp_tool = _fake_mcp_tool(required=[])  # type: ignore[attr-defined]
-        mod.list_files = binding  # type: ignore[attr-defined]
+        binding._mcp_tool = _fake_mcp_tool(required=[])
+        setattr(mod, "list_files", binding)
 
         report = await runtime_probes.run_runtime_probes({"fake": mod})
 
@@ -153,8 +153,8 @@ class TestRunRuntimeProbes:
 
         bad_mod = types.ModuleType("servers.bad")
         bad_binding = AsyncMock(side_effect=ConnectionError("down"))
-        bad_binding._mcp_tool = _fake_mcp_tool(required=[])  # type: ignore[attr-defined]
-        bad_mod.list_files = bad_binding  # type: ignore[attr-defined]
+        bad_binding._mcp_tool = _fake_mcp_tool(required=[])
+        setattr(bad_mod, "list_files", bad_binding)
 
         report = await runtime_probes.run_runtime_probes(
             {"good": good_mod, "bad": bad_mod}

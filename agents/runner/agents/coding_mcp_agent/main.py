@@ -16,6 +16,7 @@ import tools directly::
 
 from __future__ import annotations
 
+import os
 import time
 import types
 from typing import Any
@@ -29,6 +30,7 @@ from runner.agents.coding_mcp_agent.bindings import (
     build_server_modules,
     make_client,
 )
+from runner.agents.coding_mcp_agent.tool_discovery_docs import build_tool_docs_dir
 from runner.agents.models import (
     AgentRunInput,
     AgentStatus,
@@ -47,6 +49,7 @@ class CodingMCPAgent:
     config: dict[str, Any]
     start_time: float | None
     modules: dict[str, types.ModuleType]
+    tool_docs_path: str | None
     # MCP client lifecycle.
     # _client_cm: the un-entered context manager (always set in initialize)
     # _client:    the entered client, used for every tool call. Set only
@@ -66,6 +69,7 @@ class CodingMCPAgent:
         self.config = run_input.agent_config_values
         self.start_time = None
         self.modules = {}
+        self.tool_docs_path = None
         self._client_cm = None
         self._client = None
 
@@ -90,6 +94,11 @@ class CodingMCPAgent:
             )
 
         logger.info(f"Modules ready: {list(self.modules.keys())}")
+
+        logger.info("Building tool discovery docs directory...")
+        self.tool_docs_path = build_tool_docs_dir(self.modules)
+        logger.info(f"Tool docs written to: {self.tool_docs_path}")
+        _print_tool_docs_tree(self.tool_docs_path)
 
         report = await runtime_probes.run_runtime_probes(self.modules)
         logger.info(f"Runtime probe report: {report}")
@@ -140,6 +149,22 @@ class CodingMCPAgent:
             # Always close the MCP client, whether init succeeded, failed,
             # or the (future) agent loop raised.
             await self.close()
+
+
+def _print_tool_docs_tree(root: str | None) -> None:
+    if root is None:
+        return
+    """Log the generated tool docs directory as an indented tree."""
+    lines = [f"\nTool discovery docs: {root}"]
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames.sort()
+        level = dirpath.replace(root, "").count(os.sep)
+        indent = "  " * level
+        lines.append(f"{indent}{os.path.basename(dirpath)}/")
+        subindent = "  " * (level + 1)
+        for fname in sorted(filenames):
+            lines.append(f"{subindent}{fname}")
+    logger.debug("\n".join(lines))
 
 
 async def run(run_input: AgentRunInput) -> AgentTrajectoryOutput:

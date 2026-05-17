@@ -341,3 +341,41 @@ class TestGetServerNames:
         await bindings._get_server_names("http://gw/mcp")
 
         assert captured_urls == ["http://gw/apps"]
+
+
+# ---------------------------------------------------------------------------
+# get_bound_tools — filtering by _mcp_tool sentinel
+# ---------------------------------------------------------------------------
+
+
+class TestGetBoundTools:
+    def test_returns_mcp_tool_tagged_attrs(self):
+        """Only attrs with _mcp_tool set are returned."""
+        mod = types_module.ModuleType("servers.fake")
+        tool_a = SimpleNamespace(name="tool_a")
+        tool_b = SimpleNamespace(name="tool_b")
+
+        async def fn_a(): ...
+        async def fn_b(): ...
+        fn_a._mcp_tool = tool_a  # pyright: ignore[reportFunctionMemberAccess]
+        fn_b._mcp_tool = tool_b  # pyright: ignore[reportFunctionMemberAccess]
+
+        setattr(mod, "fn_a", fn_a)
+        setattr(mod, "fn_b", fn_b)
+
+        result = bindings.get_bound_tools(mod)
+        assert result == {"fn_a": tool_a, "fn_b": tool_b}
+
+    def test_untagged_attrs_are_excluded(self):
+        """Plain module attrs without _mcp_tool are filtered out."""
+        mod = types_module.ModuleType("servers.fake")
+        setattr(mod, "helper", lambda: None)
+        setattr(mod, "CONSTANT", 42)
+
+        result = bindings.get_bound_tools(mod)
+        assert result == {}
+
+    def test_empty_module_returns_empty_dict(self):
+        """Module with no attrs at all → empty dict."""
+        mod = types_module.ModuleType("servers.fake")
+        assert bindings.get_bound_tools(mod) == {}

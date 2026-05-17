@@ -223,6 +223,19 @@ def _build_one_server_module(
     return mod
 
 
+def get_bound_tools(mod: types.ModuleType) -> dict[str, Any]:
+    """Return {fn_name: Tool} for every MCP binding registered on `mod`.
+
+    Filters by the presence of `_mcp_tool` — the sentinel attached by
+    `_register_tool_on_module` — so plain module attributes are ignored.
+    """
+    return {
+        name: fn._mcp_tool  # pyright: ignore[reportFunctionMemberAccess]
+        for name, fn in vars(mod).items()
+        if hasattr(fn, "_mcp_tool")
+    }
+
+
 async def build_server_modules(
     gateway_url: str, client: Client[MCPConfigTransport]
 ) -> dict[str, types.ModuleType]:
