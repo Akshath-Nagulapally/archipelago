@@ -34,7 +34,7 @@ from loguru import logger
 
 from runner.agents.coding_mcp_agent.bindings import get_bound_tools
 from runner.agents.coding_mcp_agent.tools.bash import execute_bash
-from runner.agents.coding_mcp_agent.tools.sandbox import execute_code
+from runner.agents.coding_mcp_agent.tools.execute_code import execute_code
 from runner.agents.coding_mcp_agent.utils import parse_input_schema
 
 # ---------------------------------------------------------------------------

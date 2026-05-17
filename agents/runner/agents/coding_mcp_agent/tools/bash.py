@@ -2,7 +2,7 @@
 bash.py — execute shell commands for the CodingMCPAgent.
 
 The agent exposes two tools to the LLM: this one (`execute_bash`) and
-`sandbox.execute_code`. The bash tool is the LLM's way to *navigate* — the
+`execute_code.execute_code`. The bash tool is the LLM's way to *navigate* — the
 canonical use is exploring `/tmp/mcp-tool-docs` to discover which MCP
 servers exist and which tools each one offers::
 

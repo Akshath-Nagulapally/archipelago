@@ -1,17 +1,21 @@
 """
 CodingMCPAgent — entrypoint and lifecycle.
 
-The agent's job in this branch is intentionally narrow: build dynamic Python
-bindings for every MCP server the gateway exposes (see `bindings.py`), then
-verify each binding is reachable with a real tool call (see `binding_test.py`).
-The LLM-driven loop lives in a follow-up PR — until then `run()` returns
-`AgentStatus.ERROR` after initialization.
+This file owns the slow, one-shot setup: opening the MCP gateway client,
+building dynamic `servers.<name>` Python bindings (see `bindings.py`),
+writing the tool-discovery tree to `/tmp/mcp-tool-docs/` (see
+`tool_discovery_docs.py`), and running startup probes (see `probes.py`).
+Once `initialize()` succeeds, control hands off to `loop.AgentLoop`,
+which runs the LLM-driven step loop.
 
-Once the loop lands, agent code (and the LLM-generated code it executes) will
-import tools directly::
+The LLM (and any Python it writes) reaches MCP tools by importing them::
 
     from servers import filesystem_server, sheets_server
     text = await filesystem_server.read_text_file(path="/foo.txt")
+
+These imports resolve through `sys.modules`, which `build_server_modules`
+populates. The shared gateway client is captured inside each binding
+wrapper, so the loop layer never touches `_client` directly.
 """
 
 from __future__ import annotations
@@ -30,6 +34,7 @@ from runner.agents.coding_mcp_agent.bindings import (
     build_server_modules,
     make_client,
 )
+from runner.agents.coding_mcp_agent.loop import AgentLoop
 from runner.agents.coding_mcp_agent.probes import run_startup_probes
 from runner.agents.coding_mcp_agent.tool_discovery_docs import build_tool_docs_dir
 from runner.agents.models import (
@@ -43,6 +48,7 @@ class CodingMCPAgent:
     # Class-level annotations so basedpyright knows the attribute types
     # without requiring `@final` on the class. The actual values are bound
     # in __init__.
+    run_input: AgentRunInput
     gateway_url: str
     trajectory_id: str
     model: str
@@ -62,6 +68,10 @@ class CodingMCPAgent:
     def __init__(self, run_input: AgentRunInput):
         if run_input.mcp_gateway_url is None:
             raise ValueError("CodingMCPAgent requires an MCP gateway URL")
+
+        # Keep the raw input around so run() can hand it to AgentLoop without
+        # re-plumbing every field.
+        self.run_input = run_input
 
         self.gateway_url = run_input.mcp_gateway_url
         self.trajectory_id = run_input.trajectory_id
@@ -134,23 +144,21 @@ class CodingMCPAgent:
                     time_elapsed=time.time() - (self.start_time or time.time()),
                 )
 
-            # No agent loop on this branch — the goal here is just to verify
-            # that MCP bindings are generated from GET /apps and that each
-            # server is reachable through its `servers.<name>` module. Return
-            # ERROR so the trajectory output unambiguously signals "no agent
-            # ran".
-            logger.info(
-                "CodingMCPAgent: bindings + tests done; no agent loop on this branch"
+            # Initialization succeeded → hand off to the LLM loop. The loop
+            # reaches MCP tools only indirectly, through `from servers import
+            # ...` inside the Python it runs — `_client` stays internal to
+            # the binding wrappers.
+            loop = AgentLoop(
+                trajectory_id=self.trajectory_id,
+                model=self.model,
+                initial_messages=self.initial_messages,
+                agent_config_values=self.config,
+                extra_args=self.run_input.orchestrator_extra_args,
             )
-
-            return AgentTrajectoryOutput(
-                messages=list(self.initial_messages),
-                status=AgentStatus.ERROR,
-                time_elapsed=time.time() - (self.start_time or time.time()),
-            )
+            return await loop.run()
         finally:
             # Always close the MCP client, whether init succeeded, failed,
-            # or the (future) agent loop raised.
+            # or the agent loop raised.
             await self.close()
 
 
