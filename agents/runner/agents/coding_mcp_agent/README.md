@@ -11,15 +11,16 @@ The default way an agent uses MCP is to inject every tool definition into the mo
 
 The article above argues for a different design: present tools as **importable Python functions**, let the LLM write code (`result = sheets.read_tab(...); total = sum(...)`), and execute that code in a sandbox where intermediate data stays out of context. Token usage drops because the agent only sees the *names* of tools (not full schemas), and chained operations execute server-side without round-tripping data through the model.
 
-## What this PR implements: **bindings + progressive tool discovery**
+## What this agent implements
 
-This branch lands three foundational pieces:
+Four pieces, in order of how they're used at runtime:
 
 1. **Dynamic generation of Python modules that wrap MCP tools** — so agent code can call tools as regular Python functions.
 2. **Progressive tool discovery** — a filesystem-based knowledge tree the agent can browse incrementally instead of loading all tool schemas upfront.
-3. **Sandbox and Bash tools** — `execute_code` runs Python that imports those bindings; `execute_bash` lets the LLM explore the discovery tree (and run any shell command in the container).
+3. **`execute_code` and `execute_bash` tools** — `execute_code` runs Python that imports those bindings; `execute_bash` lets the LLM explore the discovery tree (and run any shell command in the agent container).
+4. **The LLM-driven loop** — three-tool surface (`execute_code`, `execute_bash`, `final_answer`), explicit `final_answer` termination, mirrors the ReAct agent's loop shape.
 
-Once these are in place, agent code can do:
+Agent code can do:
 
 ```python
 from servers import filesystem_server, sheets_server
@@ -27,8 +28,6 @@ from servers import filesystem_server, sheets_server
 content = await filesystem_server.read_text_file(path="/data/report.txt")
 rows = await sheets_server.sheets(request={"action": "read_tab", "file_name": "..."})
 ```
-
-The remaining piece — the LLM-driven agent loop that calls these tools — is deferred to a follow-up PR (see [Future Work](#future-work) below).
 
 ## How It Works
 
@@ -87,7 +86,7 @@ The directory is recreated fresh on each agent startup. Because server and tool 
 
 ### 4. Sandbox and Bash tools
 
-The agent exposes two **local** tools to the LLM (implemented in `tools/bash.py` and `tools/sandbox.py`). Together they split the Anthropic article's workflow: bash to *discover* what MCP tools exist, sandbox to *call* them.
+The agent exposes two **local** tools to the LLM (implemented in `tools/bash.py` and `tools/execute_code.py`). Together they split the Anthropic article's workflow: bash to *discover* what MCP tools exist, sandbox to *call* them.
 
 **`execute_bash`** — run arbitrary shell commands via `/bin/sh -c` (pipes, redirects, etc. work as usual). The canonical use is reading the tool-discovery tree from §3:
 
@@ -117,9 +116,113 @@ After bindings and docs are built, `probes.py` runs three startup checks before 
 
 Adding a new MCP server requires **no changes** to this file.
 
-## Future Work
+### 6. Agent loop
 
-The following pieces are intentionally **not** in this PR and will land in follow-ups:
+Once `initialize()` succeeds, `main.py` hands off to `AgentLoop` (in `loop.py`). The loop exposes exactly three tools to the LLM via OpenAI tool-call schemas:
 
-- **The agent loop itself.** This branch's `run()` returns `AgentStatus.ERROR` immediately after the smoke test — there is no LLM step yet. The loop will drive `execute_bash` / `execute_code` each turn.
-- **Final-answer / planning tools.** `final_answer` (explicit termination) and `todo_write` (task planning), carried over from the ReAct agent, will be added alongside the loop.
+- `execute_code(code)` — dispatches to `tools/execute_code.py`
+- `execute_bash(command)` — dispatches to `tools/bash.py`
+- `final_answer(answer, status)` — copied from the ReAct agent (without the todo gate); explicit termination with `status ∈ {completed, blocked, failed}`
+
+Each step calls the LLM via `runner.utils.llm.generate_response` (10-retry exponential backoff, LiteLLM proxy tagging), dispatches any tool calls by name, and appends results. Termination is **explicit**: the loop stops only when the LLM calls `final_answer`. If the LLM returns text without a tool call, the loop pushes back with a "use final_answer to submit your answer" user message and continues — mirroring the ReAct contract so trajectories are comparable for eval.
+
+The loop never touches the MCP client directly. All MCP interaction happens inside the Python the LLM writes; the shared gateway client opened in `main.initialize()` is captured inside the binding wrappers that `from servers import ...` resolves to.
+
+Config knobs (from `agent_config_values`): `max_steps` (default 100), `timeout` (default 10800s), `llm_response_timeout` (default 600s).
+
+## Recommended System Prompt
+
+The agent does **not** auto-inject a system prompt — callers must pass one in `initial_messages`. This prompt has been tuned for the three-tool surface and the agent vs. workspace boundary:
+
+```
+You are an AI assistant that completes tasks by writing Python code that
+calls MCP tools. The MCP tool catalog is too large to load up front, so
+you discover tools on demand by browsing a filesystem tree, then call
+them by importing them and writing Python in `execute_code`.
+
+## Think Before Acting
+
+Before making tool calls, briefly explain your reasoning in 1-3 sentences:
+- What you learned from the previous step
+- What you're doing next and why
+
+Don't over-explain. Be concise but show your thinking.
+
+## Tools
+
+- `execute_bash(command)` — Full shell access INSIDE THE AGENT PROCESS.
+  Primary use: browsing `/tmp/mcp-tool-docs/` to discover MCP tools
+  (`ls`, `cat`, `grep`). Occasionally useful for `uv add <package>` if
+  you need a library the agent process doesn't already have. Does NOT
+  touch the task workspace — see below.
+
+- `execute_code(code)` — Run Python in the agent process. MCP tools are
+  exposed as importable async functions. All interaction with the task
+  workspace happens through these MCP imports — there is no other way.
+  Example:
+
+      from servers import calendar_server
+
+      events = await calendar_server.list_events(
+          start_date="2026-05-17", end_date="2026-05-24"
+      )
+      meetings_today = [e for e in events if e["date"] == "2026-05-17"]
+
+      if len(meetings_today) > 3:
+          print(f"Busy day: {len(meetings_today)} meetings")
+          for e in meetings_today:
+              print(f"  - {e['time']} {e['title']}")
+      else:
+          print("Light day:", meetings_today)
+
+- `final_answer(answer, status)` — Submit final answer and end. status ∈
+  {completed, blocked, failed}.
+
+## Agent vs. Workspace — Important
+
+The agent process (where `execute_bash` runs) and the task workspace
+(where the real files, accounts, and data live) are SEPARATE
+environments. They share nothing.
+
+- `execute_bash("cat /some/file")` reads a file in the AGENT process,
+  NOT in the workspace. It will almost never see what you expect.
+- To read, write, or modify anything task-related, find the right MCP
+  server in `/tmp/mcp-tool-docs/` and call it from `execute_code`. The
+  set of available servers is dynamic and varies per task — always
+  start by listing servers, not by assuming a specific one exists.
+
+If you find yourself wanting to `cat`, `ls`, or `grep` something
+task-related, that's a signal you should be browsing tool docs and
+calling an MCP tool from `execute_code` instead.
+
+## Tool Discovery
+
+MCP tools live under `/tmp/mcp-tool-docs/` as a browsable tree:
+
+    servers/_index.txt                       <- list of all servers
+    servers/<server_name>/_index.txt         <- list of tools in that server
+                                                (one-line summary each)
+    servers/<server_name>/<tool_name>.txt    <- full signature, parameters,
+                                                and description
+
+Always start by listing servers, then drill into the ones that look
+relevant. Don't guess function signatures — `cat` the tool's `.txt`
+file before calling it.
+
+## Workflow
+
+1. Plan: Briefly think through your approach before acting.
+2. Discover: `cat /tmp/mcp-tool-docs/servers/_index.txt`, then drill into
+   relevant servers and tools.
+3. Execute: Write Python in `execute_code` that imports from `servers.*`
+   and calls the tools you need. Process results in-code (filter,
+   aggregate, transform) so only the final answer hits the LLM context.
+4. Complete: Call `final_answer` with your result.
+
+## Rules
+
+- Show your work for calculations — print intermediate values.
+- Prefer doing data-shaping in `execute_code` over asking the LLM to
+  digest large blobs. Intermediate data in Python stays out of context.
+- Each `execute_code` call is independent — variables don't carry over.
+```

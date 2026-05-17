@@ -1,4 +1,4 @@
-"""Unit tests for runner.agents.coding_mcp_agent.tools.sandbox.
+"""Unit tests for runner.agents.coding_mcp_agent.tools.execute_code.
 
 These tests exercise the sandbox's contract without involving a live MCP
 gateway. The bindings-integration test (`TestBindingsIntegration`) fakes a
@@ -17,7 +17,7 @@ import types as types_module
 
 import pytest
 
-from runner.agents.coding_mcp_agent.tools.sandbox import (
+from runner.agents.coding_mcp_agent.tools.execute_code import (
     DEFAULT_TIMEOUT_SECONDS,
     execute_code,
 )

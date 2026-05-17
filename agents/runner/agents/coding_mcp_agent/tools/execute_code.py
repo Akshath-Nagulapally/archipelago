@@ -1,5 +1,5 @@
 """
-sandbox.py — execute LLM-generated Python that imports MCP bindings.
+execute_code.py — execute LLM-generated Python that imports MCP bindings.
 
 After `bindings.build_server_modules()` has run, every MCP server lives in
 `sys.modules` under `servers.<name>`. User code can simply::
