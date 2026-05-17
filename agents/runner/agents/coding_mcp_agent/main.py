@@ -17,6 +17,7 @@ import tools directly::
 from __future__ import annotations
 
 import os
+import sys
 import time
 import types
 from typing import Any
@@ -25,11 +26,11 @@ from fastmcp import Client
 from fastmcp.client.transports import MCPConfigTransport
 from loguru import logger
 
-from runner.agents.coding_mcp_agent import runtime_probes
 from runner.agents.coding_mcp_agent.bindings import (
     build_server_modules,
     make_client,
 )
+from runner.agents.coding_mcp_agent.probes import run_startup_probes
 from runner.agents.coding_mcp_agent.tool_discovery_docs import build_tool_docs_dir
 from runner.agents.models import (
     AgentRunInput,
@@ -93,15 +94,20 @@ class CodingMCPAgent:
                 "No MCP server modules could be built — check gateway config"
             )
 
-        logger.info(f"Modules ready: {list(self.modules.keys())}")
+        _harness_log(
+            f"Python bindings successfully generated for all MCP servers: "
+            f"{list(self.modules.keys())}"
+        )
 
         logger.info("Building tool discovery docs directory...")
         self.tool_docs_path = build_tool_docs_dir(self.modules)
-        logger.info(f"Tool docs written to: {self.tool_docs_path}")
+        logger.debug(f"Tool docs written to: {self.tool_docs_path}")
         _print_tool_docs_tree(self.tool_docs_path)
 
-        report = await runtime_probes.run_runtime_probes(self.modules)
-        logger.info(f"Runtime probe report: {report}")
+        # Probes are strict: any failure here raises and stops the agent
+        # before the LLM loop starts. In an eval workload, a silently broken
+        # MCP server or local tool surface would contaminate trajectories.
+        await run_startup_probes(self.modules, self.tool_docs_path)
 
     async def close(self) -> None:
         """Close the shared MCP client, if it was successfully opened.
@@ -151,20 +157,33 @@ class CodingMCPAgent:
             await self.close()
 
 
+def _harness_log(msg: str) -> None:
+    """Print a message in the same `[HH:MM:SS] ...` style the harness uses."""
+    print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True, file=sys.stdout)
+
+
 def _print_tool_docs_tree(root: str | None) -> None:
+    """Print the generated tool docs directory as an indented tree."""
     if root is None:
         return
-    """Log the generated tool docs directory as an indented tree."""
-    lines = [f"\nTool discovery docs: {root}"]
+    root_name = os.path.basename(root)
+    lines = [f"{root_name}/"]
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames.sort()
         level = dirpath.replace(root, "").count(os.sep)
+        if level == 0:
+            # root itself already printed above
+            subindent = "  "
+            for fname in sorted(filenames):
+                lines.append(f"{subindent}{fname}")
+            continue
         indent = "  " * level
         lines.append(f"{indent}{os.path.basename(dirpath)}/")
         subindent = "  " * (level + 1)
         for fname in sorted(filenames):
             lines.append(f"{subindent}{fname}")
-    logger.debug("\n".join(lines))
+    tree = "\n".join(lines)
+    _harness_log(f"Tool Discovery Docs Successfully Generated. Structured as follows:\n{tree}")
 
 
 async def run(run_input: AgentRunInput) -> AgentTrajectoryOutput:
