@@ -131,23 +131,36 @@ async def build_server_modules(
     servers_pkg = _ensure_servers_namespace()
 
     modules: dict[str, types.ModuleType] = {}
-    single_server = len(server_names) == 1
 
     for server_name in server_names:
         mod = types.ModuleType(f"{SERVERS_NAMESPACE}.{server_name}")
+        prefix = f"{server_name}_"
 
-        if single_server:
-            # FastMCP doesn't prefix tools for single-server gateways.
+        # Decide whether the gateway prefixed this server's tools by looking
+        # at the actual tool list rather than guessing from len(server_names).
+        # FastMCP's prefix-stripping for single-server gateways is an
+        # implementation detail, not a stable contract — and a length-based
+        # heuristic would silently misbehave if that policy ever changed.
+        prefixed_tools = [t for t in tools if t.name.startswith(prefix)]
+
+        if prefixed_tools:
+            server_tools = prefixed_tools
+            strip_prefix = True
+        elif len(server_names) == 1:
+            # Single-server gateway, no prefixing: every tool belongs here.
             server_tools = tools
+            strip_prefix = False
         else:
-            server_tools = [t for t in tools if t.name.startswith(f"{server_name}_")]
+            # Multi-server gateway but this server contributed no prefixed
+            # tools. Don't silently build an empty module — surface it.
+            logger.warning(
+                f"No tools found for server '{server_name}' "
+                f"(searched prefix '{prefix}' across {len(tools)} tools)"
+            )
+            continue
 
         for tool in server_tools:
-            fn_name = (
-                tool.name[len(server_name) + 1:]
-                if tool.name.startswith(f"{server_name}_")
-                else tool.name
-            )
+            fn_name = tool.name[len(prefix):] if strip_prefix else tool.name
 
             # NOTE: default-arg closure on _tool_name/_client is the standard
             # Python idiom for capturing loop variables. The shared `client`
