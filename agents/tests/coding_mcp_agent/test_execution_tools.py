@@ -10,6 +10,8 @@ name and required-fields surface so an accidental rename can't ship.
 
 from __future__ import annotations
 
+import json
+
 from runner.agents.coding_mcp_agent.tools.bash import BashResult
 from runner.agents.coding_mcp_agent.tools.execute_code import ExecResult
 from runner.agents.coding_mcp_agent.tools.execution_tools import (
@@ -18,6 +20,9 @@ from runner.agents.coding_mcp_agent.tools.execution_tools import (
     format_bash_result,
     format_exec_result,
 )
+
+_CODE_SCHEMA = json.loads(json.dumps(EXECUTE_CODE_TOOL))
+_BASH_SCHEMA = json.loads(json.dumps(EXECUTE_BASH_TOOL))
 
 # ---------------------------------------------------------------------------
 # format_exec_result
@@ -36,7 +41,9 @@ class TestFormatExecResult:
         assert format_exec_result(result) == "(no output)"
 
     def test_error_with_traceback_uses_error_header(self):
-        result = ExecResult(stdout="", error="Traceback (most recent call last):\nNameError: x")
+        result = ExecResult(
+            stdout="", error="Traceback (most recent call last):\nNameError: x"
+        )
         out = format_exec_result(result)
         assert "[error]" in out
         assert "NameError: x" in out
@@ -63,6 +70,7 @@ class TestFormatExecResult:
         assert "[timeout]" in out
         assert "[error]" not in out
         assert "partial output" in out
+
 
 # ---------------------------------------------------------------------------
 # format_bash_result
@@ -126,7 +134,7 @@ class TestSchemas:
         assert EXECUTE_CODE_TOOL["function"]["name"] == "execute_code"
 
     def test_execute_code_requires_code_field(self):
-        params = EXECUTE_CODE_TOOL["function"]["parameters"]
+        params = _CODE_SCHEMA["function"]["parameters"]
         assert params["required"] == ["code"]
         assert params["properties"]["code"]["type"] == "string"
 
@@ -134,6 +142,6 @@ class TestSchemas:
         assert EXECUTE_BASH_TOOL["function"]["name"] == "execute_bash"
 
     def test_execute_bash_requires_command_field(self):
-        params = EXECUTE_BASH_TOOL["function"]["parameters"]
+        params = _BASH_SCHEMA["function"]["parameters"]
         assert params["required"] == ["command"]
         assert params["properties"]["command"]["type"] == "string"

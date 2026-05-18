@@ -32,6 +32,10 @@ from litellm.files.main import ModelResponse
 from loguru import logger
 from openai.types.chat.chat_completion_tool_param import ChatCompletionToolParam
 
+from runner.agents.coding_mcp_agent.task_tracking import (
+    TASK_WRITE_TOOL,
+    TaskTracker,
+)
 from runner.agents.coding_mcp_agent.tools.bash import execute_bash
 from runner.agents.coding_mcp_agent.tools.execute_code import execute_code
 from runner.agents.coding_mcp_agent.tools.execution_tools import (
@@ -57,6 +61,7 @@ from runner.utils.usage import UsageTracker
 _TOOLS: list[ChatCompletionToolParam] = [
     EXECUTE_CODE_TOOL,
     EXECUTE_BASH_TOOL,
+    TASK_WRITE_TOOL,
     FINAL_ANSWER_TOOL,
 ]
 
@@ -124,6 +129,7 @@ class AgentLoop:
         self.timeout = agent_config_values.get("timeout", 10800)
 
         self._usage_tracker = UsageTracker()
+        self._task_tracker = TaskTracker()
         self._finalized = False
         self._final_answer = None
         self._final_status = "completed"
@@ -195,9 +201,7 @@ class AgentLoop:
 
     def _push_continue(self, content: str) -> None:
         """Append a user-role nudge message to keep the loop moving."""
-        self.messages.append(
-            LitellmOutputMessage(role="user", content=content)
-        )
+        self.messages.append(LitellmOutputMessage(role="user", content=content))
 
     async def _dispatch_tool_calls(self, tool_calls: list[Any]) -> None:
         """Route each tool call by name. Multiple calls per step are allowed."""
@@ -214,6 +218,24 @@ class AgentLoop:
             )
 
             if name == "final_answer":
+                incomplete = self._task_tracker.get_incomplete()
+                if incomplete:
+                    ids = ", ".join(t.id for t in incomplete)
+                    error = (
+                        f"Cannot submit final_answer: {len(incomplete)} task(s) are "
+                        f"still incomplete ({ids}). Complete or cancel all tasks first."
+                    )
+                    tool_logger.bind(message_type="tool_result").warning(error)
+                    self.messages.append(
+                        LitellmOutputMessage(
+                            role="tool",
+                            tool_call_id=tool_call.id,
+                            name="final_answer",
+                            content=error,
+                        )
+                    )
+                    return
+
                 answer, status = parse_final_answer(args)
                 logger.bind(message_type="final_answer").info(answer)
                 self._finalized = True
@@ -229,6 +251,21 @@ class AgentLoop:
                 )
                 # Don't process any further tool calls in this step — we're done.
                 return
+
+            if name == "task_write":
+                result_str = self._task_tracker.handle(args)
+                tool_logger.bind(message_type="tool_result").info(
+                    f"task_write: {result_str[:120]}"
+                )
+                self.messages.append(
+                    LitellmOutputMessage(
+                        role="tool",
+                        tool_call_id=tool_call.id,
+                        name="task_write",
+                        content=result_str,
+                    )
+                )
+                continue
 
             if name == "execute_code":
                 result_str = await self._handle_execute_code(args, tool_logger)
