@@ -15,6 +15,8 @@ from runner.agents.coding_mcp_agent.tools.final_answer import (
     parse_final_answer,
 )
 
+_SCHEMA = json.loads(json.dumps(FINAL_ANSWER_TOOL))
+
 # ---------------------------------------------------------------------------
 # Happy path — well-formed JSON, valid statuses.
 # ---------------------------------------------------------------------------
@@ -100,13 +102,13 @@ class TestSchema:
         assert FINAL_ANSWER_TOOL["function"]["name"] == "final_answer"
 
     def test_both_answer_and_status_are_required(self):
-        params = FINAL_ANSWER_TOOL["function"]["parameters"]
+        params = _SCHEMA["function"]["parameters"]
         assert set(params["required"]) == {"answer", "status"}
 
     def test_status_enum_matches_parse_default(self):
         """The 'completed' fallback in parse_final_answer must be one of
         the enum values, or the LLM contract is internally inconsistent."""
-        params = FINAL_ANSWER_TOOL["function"]["parameters"]
+        params = _SCHEMA["function"]["parameters"]
         statuses = params["properties"]["status"]["enum"]
         assert "completed" in statuses
         assert "blocked" in statuses
