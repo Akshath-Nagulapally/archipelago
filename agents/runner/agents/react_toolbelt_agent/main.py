@@ -22,12 +22,12 @@ from runner.agents.models import (
     LitellmInputMessage,
     LitellmOutputMessage,
 )
+from runner.agents.resum import ReSumManager
 from runner.utils.error import is_fatal_mcp_error, is_system_error
 from runner.utils.llm import generate_response
 from runner.utils.mcp import build_mcp_gateway_schema, content_blocks_to_messages
 from runner.utils.usage import UsageTracker
 
-from .resum import ReSumManager
 from .tool_result import truncate_tool_messages
 from .tools import (
     FINAL_ANSWER_TOOL,
