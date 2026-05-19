@@ -27,7 +27,7 @@ import time
 from typing import Any
 
 from litellm import Choices
-from litellm.exceptions import Timeout
+from litellm.exceptions import ContextWindowExceededError, Timeout
 from litellm.files.main import ModelResponse
 from loguru import logger
 from openai.types.chat.chat_completion_tool_param import ChatCompletionToolParam
@@ -54,6 +54,7 @@ from runner.agents.models import (
     LitellmAnyMessage,
     LitellmOutputMessage,
 )
+from runner.agents.resum import ReSumManager
 from runner.utils.error import is_system_error
 from runner.utils.llm import generate_response
 from runner.utils.usage import UsageTracker
@@ -106,6 +107,7 @@ class AgentLoop:
     timeout: int
 
     _usage_tracker: UsageTracker
+    _resum: ReSumManager
     _finalized: bool
     _final_answer: str | None
     _final_status: str
@@ -129,6 +131,7 @@ class AgentLoop:
         self.timeout = agent_config_values.get("timeout", 10800)
 
         self._usage_tracker = UsageTracker()
+        self._resum = ReSumManager(model, extra_args)
         self._task_tracker = TaskTracker()
         self._finalized = False
         self._final_answer = None
@@ -137,6 +140,15 @@ class AgentLoop:
 
     async def step(self) -> None:
         """One LLM call → dispatch any tool calls → append results."""
+        if self._resum.should_summarize(self.messages):
+            logger.bind(message_type="resum").info(
+                "Proactive context summarization triggered"
+            )
+            try:
+                self.messages = await self._resum.summarize(self.messages)
+            except Exception as e:
+                logger.error(f"Context summarization failed: {e}")
+
         response = await self._call_llm()
         if response is None:
             return
@@ -166,8 +178,8 @@ class AgentLoop:
     async def _call_llm(self) -> ModelResponse | None:
         """Wrap generate_response so step()'s control flow stays linear.
 
-        Returns None for a recoverable timeout (caller should just continue
-        to the next step). Re-raises on anything else.
+        Returns None for recoverable errors (timeout, context window exceeded).
+        Re-raises on anything else.
         """
         try:
             return await generate_response(
@@ -178,6 +190,15 @@ class AgentLoop:
                 self.extra_args,
                 trajectory_id=self.trajectory_id,
             )
+        except ContextWindowExceededError:
+            logger.bind(message_type="resum").warning(
+                "Context window exceeded — triggering reactive summarization"
+            )
+            try:
+                self.messages = await self._resum.summarize(self.messages)
+            except Exception as summarize_err:
+                logger.error(f"Reactive summarization failed: {summarize_err}")
+            return None
         except Timeout:
             logger.bind(message_type="response").error(
                 "LLM response timed out — continuing with next step"
