@@ -677,10 +677,41 @@ class TestFormatOutputSection:
             }
         )
         lines = _format_output_section(tool)
-        assert lines[0] == "Returns:"
+        assert lines[0].startswith("Returns:")
         # Each field gets an indented row.
         assert any("status" in ln and "str" in ln for ln in lines[1:])
         assert any("count" in ln and "int" in ln for ln in lines[1:])
+
+    def test_returns_header_includes_json_serialization_note(self):
+        """Header must say 'json.loads()' so the LLM knows to deserialize first.
+
+        Regression guard for the friction seen in the excel_sum_search trajectory:
+        the agent called ``sheets_server.sheets(request={...})`` and then wrote
+        ``res['read_tab']`` — treating the result as a dict — and got
+        ``TypeError: string indices must be integers, not 'str'`` because the
+        binding wrapper always returns a JSON-encoded string. The header line
+        prevents this one-turn recovery loop.
+        """
+        tool = _fake_tool(
+            output_schema={
+                "properties": {"action": {"type": "string"}},
+                "required": ["action"],
+            }
+        )
+        lines = _format_output_section(tool)
+        assert "json.loads()" in lines[0]
+
+    def test_returns_header_names_str_return_type(self):
+        """Header must advertise ``str`` as the actual Python return type."""
+        tool = _fake_tool(
+            output_schema={
+                "properties": {"value": {"type": "integer"}},
+                "required": ["value"],
+            }
+        )
+        lines = _format_output_section(tool)
+        # e.g. "Returns: str  (JSON-serialized — call json.loads() first)"
+        assert "str" in lines[0]
 
     def test_output_required_optional_markers_from_output_required_array(self):
         """Required / optional flags come from the OUTPUT schema's required array.

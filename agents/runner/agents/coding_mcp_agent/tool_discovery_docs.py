@@ -310,6 +310,18 @@ def _format_output_section(
     trigger it (multiple top-level fields), but single-wrapped result
     types like ``{"raw_output": {"type": "string", ...}}`` will.
 
+    The header line itself reads::
+
+        Returns: str  (JSON-serialized — call json.loads() first)
+
+    rather than just ``Returns:``. The binding wrapper (``_make_tool_caller``)
+    always returns the raw MCP tool result as a JSON-encoded string, not a
+    Python dict. Without this hint, an LLM that sees ``action: str
+    (required)`` in the table naturally writes ``res["action"]`` — and gets
+    ``TypeError: string indices must be integers, not 'str'`` because ``res``
+    is still a string at that point. The note costs one line and prevents a
+    one-turn recovery loop.
+
     Args:
         tool: The MCP ``Tool`` whose outputSchema is rendered. Required.
         schema_companion: Optional qualified name (e.g.
@@ -330,7 +342,9 @@ def _format_output_section(
     if not properties:
         return []
 
-    lines: list[str] = ["Returns:"]
+    lines: list[str] = [
+        "Returns: str  (JSON-serialized — call json.loads() first)"
+    ]
     _emit_param_table(lines, properties, required)
 
     if is_wrapped_single_param(properties):
