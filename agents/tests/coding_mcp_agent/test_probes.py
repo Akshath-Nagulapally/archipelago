@@ -31,15 +31,28 @@ from runner.agents.coding_mcp_agent import probes
 # ---------------------------------------------------------------------------
 
 
-def _fake_mcp_tool(required: list[str] | None = None) -> SimpleNamespace:
-    """Stand-in for an mcp.types.Tool — only `inputSchema.required` is read."""
-    return SimpleNamespace(inputSchema={"required": required or []})
+def _fake_mcp_tool(
+    required: list[str] | None = None,
+    request_required: list[str] | None = None,
+) -> SimpleNamespace:
+    """Stand-in for an mcp.types.Tool.
+
+    `required` controls top-level `inputSchema.required`. `request_required`
+    seeds the nested `properties.request.required` so the probe can inspect
+    whether the request payload itself has required fields (used to decide
+    between `{"request": {}}` and `{"request": {"model": "input"}}`).
+    """
+    schema: dict = {"required": required or []}
+    if request_required is not None:
+        schema["properties"] = {"request": {"required": request_required}}
+    return SimpleNamespace(inputSchema=schema)
 
 
 def _attach_fake_binding(
     mod: types.ModuleType,
     fn_name: str,
     required: list[str] | None = None,
+    request_required: list[str] | None = None,
     return_value: str = "ok",
     side_effect: BaseException | type[BaseException] | None = None,
 ) -> AsyncMock:
@@ -53,7 +66,7 @@ def _attach_fake_binding(
     # so we can attach `_mcp_tool` here without a follow-up assignment —
     # which avoids both ruff's setattr-with-constant warning and pyright's
     # "attribute not declared" warning.
-    fake_tool = _fake_mcp_tool(required=required)
+    fake_tool = _fake_mcp_tool(required=required, request_required=request_required)
     if side_effect is not None:
         mock = AsyncMock(side_effect=side_effect, _mcp_tool=fake_tool)
     else:
@@ -109,17 +122,42 @@ class TestPickProbe:
         """Strategy 2: if no zero-arg tool, prefer a `*_schema` meta-tool."""
         mod = types.ModuleType("servers.fake")
         _attach_fake_binding(mod, "sheets", required=["request"])
-        _attach_fake_binding(mod, "sheets_schema", required=["request"])
+        _attach_fake_binding(
+            mod,
+            "sheets_schema",
+            required=["request"],
+            request_required=["model"],
+        )
 
         choice = probes._pick_probe(mod)
 
         assert choice == ("sheets_schema", {"request": {"model": "input"}})
 
+    def test_schema_tool_with_all_optional_request_fields(self):
+        """Strategy 2: `*_schema` tool whose inner request schema has no required
+        fields gets `{"request": {}}` — accommodates servers like slides_server
+        whose request payload is fully optional and uses `extra="forbid"`.
+        """
+        mod = types.ModuleType("servers.fake")
+        _attach_fake_binding(mod, "slides", required=["request"])
+        _attach_fake_binding(
+            mod,
+            "slides_schema",
+            required=["request"],
+            request_required=[],
+        )
+
+        choice = probes._pick_probe(mod)
+
+        assert choice == ("slides_schema", {"request": {}})
+
     def test_recognizes_bare_schema_function_name(self):
         """Strategy 2 also matches a tool named exactly `schema`."""
         mod = types.ModuleType("servers.fake")
         _attach_fake_binding(mod, "do_thing", required=["arg"])
-        _attach_fake_binding(mod, "schema", required=["request"])
+        _attach_fake_binding(
+            mod, "schema", required=["request"], request_required=["model"]
+        )
 
         choice = probes._pick_probe(mod)
 
