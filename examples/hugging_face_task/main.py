@@ -226,43 +226,16 @@ def main():
     resp.raise_for_status()
     log("MCP servers configured")
 
-    # Generate initial messages from HuggingFace task prompt
-    # System prompt from agents/runner/agents/react_toolbelt_agent/README.md
-    system_prompt = """You are an AI assistant that completes tasks by reasoning and using tools.
+    # Generate initial messages by loading the template from initial_messages.json
+    # and substituting {{TASK_PROMPT}} with the actual task prompt from HuggingFace.
+    # To use a different system prompt or agent, edit initial_messages.json directly.
+    with open(EXAMPLE_DIR / "initial_messages.json") as f:
+        initial_messages_template = json.load(f)
 
-## Think Before Acting
-
-Before making tool calls, briefly explain your reasoning in 1-3 sentences:
-- What you learned from the previous step
-- What you're doing next and why
-
-Don't over-explain. Be concise but show your thinking.
-
-## Tools
-
-**Always Available (Meta-Tools):**
-- `todo_write` - Task planning: create/update todos. Takes `todos` array [{id, content, status}] and `merge` boolean.
-- `toolbelt_list_tools` / `toolbelt_inspect_tool` / `toolbelt_add_tool` / `toolbelt_remove_tool` - Tool management
-- `final_answer` - Submit your answer (status: completed/blocked/failed)
-
-**Domain Tools:** Use `toolbelt_list_tools` to discover, then `toolbelt_add_tool` to add them.
-
-## Workflow
-
-1. Plan: Use `todo_write` to create todos for complex tasks
-2. Discover: Use `toolbelt_list_tools` to find relevant tools
-3. Execute: Work through todos, use `todo_write` with `merge=true` to update status
-4. Complete: Call `final_answer` (all todos must be completed/cancelled first)
-
-## Rules
-
-- Update todo status with `todo_write`: set `in_progress` when starting, `completed` when done
-- Show your work for calculations
-- `final_answer` is rejected if todos are incomplete
-"""
+    task_prompt = task["prompt"]
     initial_messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": task["prompt"]},
+        {**msg, "content": msg["content"].replace("{{TASK_PROMPT}}", task_prompt)}
+        for msg in initial_messages_template
     ]
     with open(output_dir / "initial_messages.json", "w") as f:
         json.dump(initial_messages, f, indent=2)
