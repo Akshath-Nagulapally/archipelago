@@ -14,11 +14,13 @@ from typing import Any
 
 from runner.agents.coding_mcp_agent.tool_discovery_docs import (
     _build_call_signature,
+    _format_output_section,
     _format_tool_txt,
     _json_type_to_python,
     build_tool_docs_dir,
     is_wrapped_single_param,
 )
+from runner.agents.coding_mcp_agent.utils import parse_output_schema
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -28,12 +30,24 @@ from runner.agents.coding_mcp_agent.tool_discovery_docs import (
 def _fake_tool(
     description: str | None = "",
     input_schema: dict[str, Any] | None = None,
+    output_schema: dict[str, Any] | None = None,
 ) -> SimpleNamespace:
-    """Stand-in for an mcp.types.Tool — only description + inputSchema are read."""
-    return SimpleNamespace(
-        description=description,
-        inputSchema=input_schema if input_schema is not None else {},
-    )
+    """Stand-in for an mcp.types.Tool — description + inputSchema + outputSchema.
+
+    ``outputSchema`` is genuinely optional on real MCP tools (FastMCP only
+    emits it for Pydantic-typed return annotations). To faithfully model
+    that, we leave the attribute *absent* on the namespace when the caller
+    doesn't pass one — instead of setting it to ``{}`` — so consumers see
+    the same ``getattr(tool, "outputSchema", None) is None`` shape they
+    would in production.
+    """
+    kwargs: dict[str, Any] = {
+        "description": description,
+        "inputSchema": input_schema if input_schema is not None else {},
+    }
+    if output_schema is not None:
+        kwargs["outputSchema"] = output_schema
+    return SimpleNamespace(**kwargs)
 
 
 def _fake_module(
@@ -599,3 +613,467 @@ class TestIsWrappedSingleParam:
     def test_single_non_dict_property_value_is_not_wrapped(self):
         """A malformed schema where the property value isn't even a dict → safe False."""
         assert is_wrapped_single_param({"req": "not a schema"}) is False  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# parse_output_schema — utils helper for reading tool.outputSchema
+# ---------------------------------------------------------------------------
+
+
+class TestParseOutputSchema:
+    def test_parse_output_schema_returns_properties_and_required(self):
+        """Tool with a populated outputSchema → properties dict + required set."""
+        tool = _fake_tool(
+            output_schema={
+                "properties": {
+                    "result": {"type": "string"},
+                    "count": {"type": "integer"},
+                },
+                "required": ["result"],
+            }
+        )
+        properties, required = parse_output_schema(tool)
+        assert set(properties.keys()) == {"result", "count"}
+        assert required == {"result"}
+
+    def test_parse_output_schema_missing_returns_empty(self):
+        """Tool with no outputSchema attribute → empty dict + empty set, no crash.
+
+        This is the common case: FastMCP only populates outputSchema when the
+        tool function has a Pydantic-typed return annotation. Plain ``-> str``
+        tools have no schema and the helper must not blow up.
+        """
+        tool = _fake_tool()  # no output_schema kwarg → attribute absent
+        properties, required = parse_output_schema(tool)
+        assert properties == {}
+        assert required == set()
+
+
+# ---------------------------------------------------------------------------
+# _format_output_section — the new Returns: block renderer
+# ---------------------------------------------------------------------------
+
+
+class TestFormatOutputSection:
+    def test_no_output_schema_returns_empty_list(self):
+        """Tool without outputSchema → empty list; caller appends nothing."""
+        tool = _fake_tool()
+        assert _format_output_section(tool) == []
+
+    def test_empty_output_schema_returns_empty_list(self):
+        """outputSchema present but with no properties → empty list, no spurious header."""
+        tool = _fake_tool(output_schema={"type": "object"})
+        assert _format_output_section(tool) == []
+
+    def test_basic_output_schema_emits_returns_header_and_table(self):
+        """Flat output schema → starts with ``Returns:`` header, then param rows."""
+        tool = _fake_tool(
+            output_schema={
+                "properties": {
+                    "status": {"type": "string", "description": "Operation status."},
+                    "count": {"type": "integer", "description": "Items processed."},
+                },
+                "required": ["status"],
+            }
+        )
+        lines = _format_output_section(tool)
+        assert lines[0].startswith("Returns:")
+        # Each field gets an indented row.
+        assert any("status" in ln and "str" in ln for ln in lines[1:])
+        assert any("count" in ln and "int" in ln for ln in lines[1:])
+
+    def test_returns_header_includes_json_serialization_note(self):
+        """Header must say 'json.loads()' so the LLM knows to deserialize first.
+
+        Regression guard for the friction seen in the excel_sum_search trajectory:
+        the agent called ``sheets_server.sheets(request={...})`` and then wrote
+        ``res['read_tab']`` — treating the result as a dict — and got
+        ``TypeError: string indices must be integers, not 'str'`` because the
+        binding wrapper always returns a JSON-encoded string. The header line
+        prevents this one-turn recovery loop.
+        """
+        tool = _fake_tool(
+            output_schema={
+                "properties": {"action": {"type": "string"}},
+                "required": ["action"],
+            }
+        )
+        lines = _format_output_section(tool)
+        assert "json.loads()" in lines[0]
+
+    def test_returns_header_names_str_return_type(self):
+        """Header must advertise ``str`` as the actual Python return type."""
+        tool = _fake_tool(
+            output_schema={
+                "properties": {"value": {"type": "integer"}},
+                "required": ["value"],
+            }
+        )
+        lines = _format_output_section(tool)
+        # e.g. "Returns: str  (JSON-serialized — call json.loads() first)"
+        assert "str" in lines[0]
+
+    def test_output_required_optional_markers_from_output_required_array(self):
+        """Required / optional flags come from the OUTPUT schema's required array.
+
+        Guards against accidentally reusing the input schema's required when
+        rendering the output block.
+        """
+        tool = _fake_tool(
+            input_schema={
+                "properties": {"x": {"type": "string"}},
+                "required": ["x"],  # input-side required must NOT bleed into output
+            },
+            output_schema={
+                "properties": {
+                    "always_there": {"type": "string"},
+                    "maybe_there": {"type": "string"},
+                },
+                "required": ["always_there"],
+            },
+        )
+        lines = _format_output_section(tool)
+        always_line = next(ln for ln in lines if "always_there" in ln)
+        maybe_line = next(ln for ln in lines if "maybe_there" in ln)
+        assert "(required)" in always_line
+        assert "(optional)" in maybe_line
+
+    def test_output_descriptions_preserved(self):
+        """Field descriptions from the output schema appear verbatim in the table."""
+        tool = _fake_tool(
+            output_schema={
+                "properties": {
+                    "raw_output": {
+                        "type": "string",
+                        "description": "Formatted table output.",
+                    }
+                },
+                "required": ["raw_output"],
+            }
+        )
+        text = "\n".join(_format_output_section(tool))
+        assert "Formatted table output." in text
+
+    def test_wrapped_output_schema_unwraps_one_level(self):
+        """Output schema matching the single-wrapped-param shape → emits
+        ``Fields of `<wrapper>`:`` block beneath ``Returns:``.
+
+        This is the practical case that motivated the whole feature —
+        single-result-type outputs like ``{"result": {"raw_output": ...}}``
+        should surface the inner structure so the LLM doesn't have to call
+        the tool just to discover what ``raw_output`` is.
+        """
+        tool = _fake_tool(
+            output_schema={
+                "properties": {
+                    "result": {
+                        "type": "object",
+                        "properties": {
+                            "raw_output": {
+                                "type": "string",
+                                "description": "Formatted table output.",
+                            },
+                            "row_count": {"type": "integer"},
+                        },
+                        "required": ["raw_output"],
+                    }
+                },
+                "required": ["result"],
+            }
+        )
+        text = "\n".join(_format_output_section(tool))
+        assert "Returns:" in text
+        assert "Fields of `result`:" in text
+        # Inner fields appear under the Fields header.
+        fields_section = text.split("Fields of `result`:", 1)[1]
+        assert "raw_output" in fields_section
+        assert "row_count" in fields_section
+
+    def test_wrapped_output_only_unwraps_one_level(self):
+        """Doubly-wrapped output schemas stop at depth 1 — same safety rail as input."""
+        tool = _fake_tool(
+            output_schema={
+                "properties": {
+                    "outer": {
+                        "type": "object",
+                        "properties": {
+                            "inner": {
+                                "type": "object",
+                                "properties": {
+                                    "deep_field": {"type": "string"},
+                                },
+                            },
+                        },
+                        "required": ["inner"],
+                    }
+                },
+                "required": ["outer"],
+            }
+        )
+        text = "\n".join(_format_output_section(tool))
+        assert "Fields of `outer`:" in text
+        # We do NOT recurse a second time.
+        assert "deep_field" not in text
+        assert text.count("Fields of") == 1
+
+
+# ---------------------------------------------------------------------------
+# _format_tool_txt — integration with the new output section
+# ---------------------------------------------------------------------------
+
+
+class TestFormatToolTxtWithOutputSchema:
+    def test_format_tool_txt_appends_returns_block_when_outputschema_present(self):
+        """Tool with both inputSchema and outputSchema → output contains both blocks."""
+        tool = _fake_tool(
+            description="A tool with a structured return.",
+            input_schema={
+                "properties": {"file_path": {"type": "string"}},
+                "required": ["file_path"],
+            },
+            output_schema={
+                "properties": {
+                    "status": {"type": "string"},
+                    "size": {"type": "integer"},
+                },
+                "required": ["status"],
+            },
+        )
+        out = _format_tool_txt("svr", "tool", tool)
+        assert "Parameters:" in out
+        assert "Returns:" in out
+        # Output-section fields visible.
+        assert "status" in out
+        assert "size" in out
+
+    def test_format_tool_txt_no_returns_block_when_outputschema_missing(self):
+        """No outputSchema → doc renders exactly as it did before this code existed.
+
+        Regression guard for plain ``-> str``-returning tools like the
+        filesystem server's read_text_file. We must not emit a stray
+        ``Returns:`` header when there's nothing to render.
+        """
+        tool = _fake_tool(
+            description="A flat tool with no structured return.",
+            input_schema={
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+            },
+            # no output_schema kwarg
+        )
+        out = _format_tool_txt("svr", "list_files", tool)
+        assert "Parameters:" in out
+        assert "Returns:" not in out
+
+    def test_format_tool_txt_section_order_parameters_before_returns(self):
+        """``Parameters:`` always precedes ``Returns:`` in the rendered doc.
+
+        Stable ordering matters because the LLM is scanning the doc top-down;
+        it makes a better mental model when inputs come first.
+        """
+        tool = _fake_tool(
+            input_schema={"properties": {"x": {"type": "string"}}, "required": ["x"]},
+            output_schema={
+                "properties": {"y": {"type": "string"}},
+                "required": ["y"],
+            },
+        )
+        out = _format_tool_txt("svr", "tool", tool)
+        params_idx = out.find("Parameters:")
+        returns_idx = out.find("Returns:")
+        assert params_idx != -1 and returns_idx != -1
+        assert params_idx < returns_idx
+
+
+# ---------------------------------------------------------------------------
+# _format_output_section — robustness on malformed output schemas
+# ---------------------------------------------------------------------------
+
+
+class TestFormatOutputSectionRobustness:
+    def test_outputschema_with_null_required_does_not_crash(self):
+        """Output schema with ``"required": null`` → all fields rendered as optional."""
+        tool = _fake_tool(
+            output_schema={
+                "properties": {
+                    "x": {"type": "string"},
+                    "y": {"type": "integer"},
+                },
+                "required": None,
+            }
+        )
+        text = "\n".join(_format_output_section(tool))
+        # Both fields appear, both as optional.
+        x_line = next(ln for ln in text.splitlines() if "x " in ln)
+        y_line = next(ln for ln in text.splitlines() if "y " in ln)
+        assert "(optional)" in x_line
+        assert "(optional)" in y_line
+
+    def test_outputschema_with_non_dict_inner_properties_falls_back_safely(self):
+        """Wrapped-shape detection bails out on malformed inner ``properties``.
+
+        We still render the outer ``Returns:`` block (the wrapper field is
+        valid as a top-level entry), but we do NOT emit a `Fields of` block.
+        """
+        tool = _fake_tool(
+            output_schema={
+                "properties": {
+                    "result": {"type": "object", "properties": None},
+                },
+                "required": ["result"],
+            }
+        )
+        text = "\n".join(_format_output_section(tool))
+        assert "Returns:" in text
+        # The wrapper field is in the outer table.
+        assert "result" in text
+        # But the wrapped path didn't trigger.
+        assert "Fields of" not in text
+
+
+# ---------------------------------------------------------------------------
+# build_tool_docs_dir — end-to-end coverage for output schema rendering
+# ---------------------------------------------------------------------------
+
+
+class TestBuildToolDocsDirWithOutputSchema:
+    def test_outputschema_with_wrapped_shape_lands_in_doc_file(self):
+        """End-to-end: a fake meta-tool style schema produces a .txt on disk
+        containing both wrapped-input AND wrapped-output blocks.
+
+        This is the bytes-on-disk version of the unit tests above — the LLM
+        will `cat /tmp/mcp-tool-docs/.../tool.txt` to see this content.
+        """
+        tool = _fake_tool(
+            description="A meta-tool with structured input and output.",
+            input_schema={
+                "properties": {
+                    "request": {
+                        "type": "object",
+                        "properties": {
+                            "action": {"type": "string"},
+                            "file_path": {"type": "string"},
+                        },
+                        "required": ["action"],
+                    }
+                },
+                "required": ["request"],
+            },
+            output_schema={
+                "properties": {
+                    "result": {
+                        "type": "object",
+                        "properties": {
+                            "raw_output": {"type": "string"},
+                        },
+                        "required": ["raw_output"],
+                    }
+                },
+                "required": ["result"],
+            },
+        )
+        mod = _fake_module("svr", {"tool": tool})
+
+        path = Path(build_tool_docs_dir({"svr": mod}))
+        doc = (path / "servers" / "svr" / "tool.txt").read_text()
+
+        # Input section (already validated by PR #12 tests, sanity-checked here).
+        assert "svr.tool(*, request: dict)" in doc
+        assert "Fields of `request`:" in doc
+        # Output section — the new behavior.
+        assert "Returns:" in doc
+        assert "Fields of `result`:" in doc
+        assert "raw_output" in doc
+
+
+# ---------------------------------------------------------------------------
+# Schema companion hint — points the LLM at <fn>_schema introspection tools
+# ---------------------------------------------------------------------------
+
+
+class TestSchemaCompanionHint:
+    def test_returns_block_includes_companion_hint_when_companion_set(self):
+        """Output schema present + companion qualified name passed → hint appears
+        as a trailing line in the Returns block, separated by a blank line.
+        """
+        tool = _fake_tool(
+            output_schema={
+                "properties": {"x": {"type": "string"}},
+                "required": ["x"],
+            }
+        )
+        lines = _format_output_section(
+            tool, schema_companion="sheets_server.sheets_schema"
+        )
+        text = "\n".join(lines)
+        # The hint line is the last meaningful content in the section.
+        assert (
+            "For the full nested output schema, see `sheets_server.sheets_schema`."
+            in text
+        )
+
+    def test_no_companion_means_no_hint_line(self):
+        """Without a companion, the Returns block ends after the param table —
+        no stray "see ..." line."""
+        tool = _fake_tool(
+            output_schema={
+                "properties": {"x": {"type": "string"}},
+                "required": ["x"],
+            }
+        )
+        lines = _format_output_section(tool, schema_companion=None)
+        text = "\n".join(lines)
+        assert "For the full nested output schema" not in text
+
+    def test_no_outputschema_means_no_hint_even_with_companion(self):
+        """A tool without an outputSchema gets no Returns block, and we do NOT
+        emit a standalone "see schema tool" line for it.
+
+        Rationale: a bare hint line in an otherwise-empty section adds noise
+        without context. The hint is meaningful only when augmenting a
+        rendered Returns block.
+        """
+        tool = _fake_tool()  # no output_schema
+        lines = _format_output_section(
+            tool, schema_companion="sheets_server.sheets_schema"
+        )
+        assert lines == []
+
+    def test_e2e_companion_detected_in_build_tool_docs_dir(self):
+        """End-to-end: registering both `sheets` and `sheets_schema` in the
+        same fake module → the `sheets` doc on disk contains the companion
+        hint, and the `sheets_schema` doc does NOT contain a self-referential
+        hint (no `sheets_schema_schema` exists in the module).
+        """
+        sheets_tool = _fake_tool(
+            description="A meta-tool.",
+            output_schema={
+                "properties": {"action": {"type": "string"}},
+                "required": ["action"],
+            },
+        )
+        sheets_schema_tool = _fake_tool(
+            description="Schema introspection for the meta-tool.",
+            output_schema={
+                "properties": {"model": {"type": "string"}},
+                "required": ["model"],
+            },
+        )
+        mod = _fake_module(
+            "sheets_server",
+            {"sheets": sheets_tool, "sheets_schema": sheets_schema_tool},
+        )
+
+        path = Path(build_tool_docs_dir({"sheets_server": mod}))
+        sheets_doc = (path / "servers" / "sheets_server" / "sheets.txt").read_text()
+        schema_doc = (
+            path / "servers" / "sheets_server" / "sheets_schema.txt"
+        ).read_text()
+
+        # The main meta-tool's doc gets the pointer to its companion.
+        assert "sheets_server.sheets_schema" in sheets_doc
+        assert "For the full nested output schema" in sheets_doc
+        # The companion's own doc must NOT reference a non-existent
+        # `sheets_schema_schema` — the convention check correctly skips it.
+        assert "sheets_schema_schema" not in schema_doc
+        assert "For the full nested output schema" not in schema_doc
