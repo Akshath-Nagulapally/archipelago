@@ -11,6 +11,48 @@ Structure:
         <server_name>/
             _index.txt              <- one-liner per tool in this server
             <tool_name>.txt         <- full signature + parameter docs
+
+Signature rendering contract
+----------------------------
+
+The signature on the first line of each ``<tool_name>.txt`` is emitted with
+a leading ``*, `` to mark every binding as kwargs-only. This matches the
+actual contract of ``bindings._make_tool_caller``, which is a
+``**kwargs``-only wrapper by design. Without the marker the signature would
+read as positional-or-keyword in standard Python syntax and an LLM that
+calls ``tool({...})`` positionally would hit a TypeError before the wrapper
+ever runs.
+
+Wrapped-param tools (meta-tools and Pydantic-wrapped individual tools)
+----------------------------------------------------------------------
+
+Two real-world server patterns produce a schema with a single top-level
+property that is itself a structured object:
+
+1. Meta-tools — one MCP tool routes many operations via an ``action`` field
+   in its single Pydantic input model (e.g. ``sheets_server.sheets``).
+2. Individual tools written with a wrapped Pydantic input — one function
+   parameter of type ``SomeInputModel`` (e.g. ``read_tab(input: ReadTabInput)``).
+
+For both shapes, ``_format_tool_txt`` recurses ONE level into the wrapper
+and renders the inner fields under a ``Fields of `<wrapper>`:`` section.
+The outer ``Parameters:`` line still appears, so the LLM sees both the
+honest call shape (``tool(*, request: dict)``) and the contents that go
+inside the wrapper dict.
+
+Detection of this shape is delegated to ``is_wrapped_single_param`` and
+deliberately bails out (returns False, falls back to flat rendering) on
+any structural anomaly — multiple top-level properties, ``$ref``-only
+inner schemas, opaque ``dict[str, Any]`` blobs without nested
+``properties``, etc. The asymmetry is intentional: every false-negative
+preserves today's behavior; only a very specific fingerprint enables
+unwrapping.
+
+Out of scope (deferred to later enhancements):
+    - ``$ref`` resolution against schemas that arrive un-flattened
+    - ``oneOf`` / ``anyOf`` traversal at the wrapper root
+    - Enum value rendering (``Literal["a", "b"]`` → ``(one of: a, b)``)
+    - Output schema rendering (return-shape hints)
 """
 
 from __future__ import annotations
@@ -30,6 +72,58 @@ _JSON_TYPE_MAP: dict[str, str] = {
     "array": "list",
     "object": "dict",
 }
+
+
+def is_wrapped_single_param(properties: dict[str, Any]) -> bool:
+    """Detect the "one parameter that's a Pydantic-style nested object" shape.
+
+    Two real-world patterns produce this shape:
+
+    1. **Meta-tools** like ``sheets_server.sheets(request: SheetsInput)`` —
+       one function, one Pydantic-typed parameter that holds the entire
+       action-routed interface inside.
+    2. **Individual tools written with a wrapped Pydantic input**, e.g.
+       ``read_tab(input: ReadTabInput)`` — still one parameter, still a
+       nested object, even though it isn't a meta-tool.
+
+    In both cases the *real* parameter info lives one level deeper than the
+    flat-tool case (``read_text_file(file_path: str, ...)``), and our docs
+    renderer needs to know to look inside.
+
+    Detection rule — all three must hold:
+
+    1. Exactly one top-level property.
+    2. That property's ``type`` is ``"object"`` (or a JSON-Schema-2020-12
+       type-array that contains ``"object"``, e.g. ``["object", "null"]``).
+    3. That property has its own non-empty ``properties`` dict — i.e. it's
+       a structured object, not an opaque ``dict[str, Any]`` blob.
+
+    Any other shape returns False and the caller falls back to the existing
+    flat rendering path. This asymmetry is intentional: a False answer is
+    always safe (it preserves today's behavior); a True answer requires a
+    very specific structural fingerprint.
+
+    Note: this detector deliberately does NOT recurse. If the inner schema
+    is itself a wrapped single-object, we still report True for the outer
+    layer only — the renderer unwraps one level and stops. This guards
+    against runaway expansion on cyclic / deeply-nested schemas.
+    """
+    if len(properties) != 1:
+        return False
+
+    sole = next(iter(properties.values()))
+    if not isinstance(sole, dict):
+        return False
+
+    type_field = sole.get("type")
+    is_object = type_field == "object" or (
+        isinstance(type_field, list) and "object" in type_field
+    )
+    if not is_object:
+        return False
+
+    inner_properties = sole.get("properties")
+    return isinstance(inner_properties, dict) and len(inner_properties) > 0
 
 
 def build_tool_docs_dir(modules: dict[str, Any]) -> str:
@@ -76,7 +170,19 @@ def build_tool_docs_dir(modules: dict[str, Any]) -> str:
 
 
 def _format_tool_txt(server_name: str, fn_name: str, tool: Any) -> str:
-    """Format the full .txt content for a single tool."""
+    """Format the full .txt content for a single tool.
+
+    The output always contains the call signature, the tool description, and
+    a ``Parameters:`` table listing the top-level inputSchema properties.
+
+    For meta-tool / Pydantic-wrapped tools (see ``is_wrapped_single_param``),
+    we additionally emit a ``Fields of `<wrapper>`:`` block listing the
+    fields nested one level inside the wrapper. We keep the outer
+    ``Parameters:`` line as well — it's the honest picture of the call shape
+    (``await tool(*, request={...})``), and the inner block tells the LLM
+    what goes *inside* that dict. Unwrapping stops at one level by design;
+    deeper nesting still renders as ``dict``.
+    """
     properties, required = parse_input_schema(tool)
 
     lines: list[str] = []
@@ -90,16 +196,40 @@ def _format_tool_txt(server_name: str, fn_name: str, tool: Any) -> str:
 
     if properties:
         lines.append("Parameters:")
-        max_name_len = max((len(name) for name in properties), default=0)
-        for param_name, param_schema in properties.items():
-            py_type = _json_type_to_python(param_schema)
-            req_str = "(required)" if param_name in required else "(optional)"
-            param_desc = param_schema.get("description", "")
-            lines.append(
-                f"  {param_name:<{max_name_len}}  {py_type:<6}  {req_str}  {param_desc}".rstrip()
-            )
+        _emit_param_table(lines, properties, required)
+
+        if is_wrapped_single_param(properties):
+            wrapper_name = next(iter(properties))
+            inner_schema = properties[wrapper_name]
+            inner_properties: dict[str, Any] = inner_schema["properties"]
+            inner_required: set[str] = set(inner_schema.get("required") or [])
+
+            lines.append("")
+            lines.append(f"Fields of `{wrapper_name}`:")
+            _emit_param_table(lines, inner_properties, inner_required)
 
     return "\n".join(lines) + "\n"
+
+
+def _emit_param_table(
+    lines: list[str], properties: dict[str, Any], required: set[str]
+) -> None:
+    """Append a parameter table to ``lines`` for the given properties.
+
+    Factored out of ``_format_tool_txt`` so the wrapped-tool case can render
+    the same shape twice (once for the wrapper, once for its inner fields)
+    without duplicating the column-alignment logic.
+    """
+    if not properties:
+        return
+    max_name_len = max((len(name) for name in properties), default=0)
+    for param_name, param_schema in properties.items():
+        py_type = _json_type_to_python(param_schema)
+        req_str = "(required)" if param_name in required else "(optional)"
+        param_desc = param_schema.get("description", "")
+        lines.append(
+            f"  {param_name:<{max_name_len}}  {py_type:<6}  {req_str}  {param_desc}".rstrip()
+        )
 
 
 def _build_call_signature(
@@ -108,7 +238,22 @@ def _build_call_signature(
     properties: dict[str, Any],
     required: set[str],
 ) -> str:
-    """Reconstruct the Python call signature from parsed inputSchema fields."""
+    """Reconstruct the Python call signature from parsed inputSchema fields.
+
+    Every binding wrapper produced by ``bindings._make_tool_caller`` is a
+    ``**kwargs``-only async function — it accepts zero positional arguments
+    by design (see that function's docstring for the rationale). We emit a
+    leading ``*, `` separator so the rendered signature honestly advertises
+    that contract:
+
+        sheets_server.sheets(*, request: dict)
+
+    Without the ``*, ``, the signature reads as positional-or-keyword in
+    standard Python syntax, and the LLM may write ``sheets({...})`` which
+    fails with ``TypeError: _call() takes 0 positional arguments but 1 was
+    given``. The marker is only emitted when there is at least one parameter
+    after it — ``foo(*,)`` is invalid Python.
+    """
     required_params = [p for p in properties if p in required]
     optional_params = [p for p in properties if p not in required]
 
@@ -116,7 +261,9 @@ def _build_call_signature(
         f"{name}: {_json_type_to_python(properties[name])}"
         for name in required_params + optional_params
     ]
-    return f"{server_name}.{fn_name}({', '.join(param_strs)})"
+    if param_strs:
+        return f"{server_name}.{fn_name}(*, {', '.join(param_strs)})"
+    return f"{server_name}.{fn_name}()"
 
 
 def _json_type_to_python(param_schema: dict[str, Any]) -> str:
