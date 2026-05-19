@@ -48,11 +48,34 @@ inner schemas, opaque ``dict[str, Any]`` blobs without nested
 preserves today's behavior; only a very specific fingerprint enables
 unwrapping.
 
+Output schema rendering (``Returns:`` block)
+--------------------------------------------
+
+When ``tool.outputSchema`` is populated (FastMCP emits this whenever the
+tool function has a Pydantic-typed return annotation), we render a
+``Returns:`` section beneath the input section using the same parameter
+table machinery — including the one-level unwrap rule. Tools that return
+plain ``str`` have no outputSchema and the section is omitted entirely;
+their docs render exactly as they did before this code existed.
+
+The motivating failure: an LLM that calls a meta-tool like
+``sheets_server.sheets(request={'action': 'read_tab', ...})`` receives
+a JSON-serialized ``SheetsOutput`` and has no docs telling it about
+fields like ``read_tab.raw_output``. Without that hint, the model is
+known to mis-parse the response (e.g. running ``ast.literal_eval`` on
+an ASCII-table string) and fall back to reading numbers off the
+printout — breaking the architectural promise that intermediate data
+stays in Python locals.
+
 Out of scope (deferred to later enhancements):
     - ``$ref`` resolution against schemas that arrive un-flattened
     - ``oneOf`` / ``anyOf`` traversal at the wrapper root
     - Enum value rendering (``Literal["a", "b"]`` → ``(one of: a, b)``)
-    - Output schema rendering (return-shape hints)
+    - Per-action discriminated-union output rendering (showing only the
+      relevant result field per action)
+    - Second-level expansion for output-side nested objects (would
+      explode doc size on tools like ``SheetsOutput`` with 13 result
+      sub-types; defer until evidence justifies the bloat)
 """
 
 from __future__ import annotations
@@ -62,7 +85,10 @@ from pathlib import Path
 from typing import Any
 
 from runner.agents.coding_mcp_agent.bindings import get_bound_tools
-from runner.agents.coding_mcp_agent.utils import parse_input_schema
+from runner.agents.coding_mcp_agent.utils import (
+    parse_input_schema,
+    parse_output_schema,
+)
 
 _JSON_TYPE_MAP: dict[str, str] = {
     "string": "str",
@@ -151,14 +177,28 @@ def build_tool_docs_dir(modules: dict[str, Any]) -> str:
         server_dir.mkdir()
 
         tool_index_lines: list[str] = []
+        bound_tools = get_bound_tools(mod)
+        # Set membership check is O(1); used to detect <fn>_schema companions
+        # so meta-tools can point the LLM at their introspection sibling.
+        tool_names_in_server = set(bound_tools.keys())
 
-        for fn_name, tool in get_bound_tools(mod).items():
+        for fn_name, tool in bound_tools.items():
             description = (tool.description or "").strip()
             first_line = description.splitlines()[0] if description else ""
 
             tool_index_lines.append(f"{fn_name}: {first_line}")
+
+            companion_name = f"{fn_name}_schema"
+            schema_companion = (
+                f"{server_name}.{companion_name}"
+                if companion_name in tool_names_in_server
+                else None
+            )
+
             (server_dir / f"{fn_name}.txt").write_text(
-                _format_tool_txt(server_name, fn_name, tool)
+                _format_tool_txt(
+                    server_name, fn_name, tool, schema_companion=schema_companion
+                )
             )
 
         (server_dir / "_index.txt").write_text("\n".join(tool_index_lines) + "\n")
@@ -169,7 +209,12 @@ def build_tool_docs_dir(modules: dict[str, Any]) -> str:
     return str(root)
 
 
-def _format_tool_txt(server_name: str, fn_name: str, tool: Any) -> str:
+def _format_tool_txt(
+    server_name: str,
+    fn_name: str,
+    tool: Any,
+    schema_companion: str | None = None,
+) -> str:
     """Format the full .txt content for a single tool.
 
     The output always contains the call signature, the tool description, and
@@ -182,6 +227,12 @@ def _format_tool_txt(server_name: str, fn_name: str, tool: Any) -> str:
     (``await tool(*, request={...})``), and the inner block tells the LLM
     what goes *inside* that dict. Unwrapping stops at one level by design;
     deeper nesting still renders as ``dict``.
+
+    The ``schema_companion`` parameter, when set, is the qualified name of
+    a sibling tool (e.g. ``"sheets_server.sheets_schema"``) that exposes
+    deeper schema introspection. It gets forwarded to
+    ``_format_output_section``, which decides whether emitting a pointer
+    line is worth it for this particular tool.
     """
     properties, required = parse_input_schema(tool)
 
@@ -208,6 +259,14 @@ def _format_tool_txt(server_name: str, fn_name: str, tool: Any) -> str:
             lines.append(f"Fields of `{wrapper_name}`:")
             _emit_param_table(lines, inner_properties, inner_required)
 
+    output_lines = _format_output_section(tool, schema_companion=schema_companion)
+    if output_lines:
+        # Blank line between Parameters and Returns sections (or after the
+        # description if there were no Parameters at all).
+        if lines and lines[-1] != "":
+            lines.append("")
+        lines.extend(output_lines)
+
     return "\n".join(lines) + "\n"
 
 
@@ -230,6 +289,67 @@ def _emit_param_table(
         lines.append(
             f"  {param_name:<{max_name_len}}  {py_type:<6}  {req_str}  {param_desc}".rstrip()
         )
+
+
+def _format_output_section(
+    tool: Any, schema_companion: str | None = None
+) -> list[str]:
+    """Render the ``Returns:`` block for a tool, if its outputSchema has any.
+
+    MCP tools may or may not publish an output schema — FastMCP populates
+    ``tool.outputSchema`` only when the tool function has a Pydantic-typed
+    return annotation. Tools that return plain ``str`` produce no output
+    schema, and this function returns an empty list so the caller appends
+    nothing (preserving the historical doc format for those tools).
+
+    When a schema *is* present, we render it the same way the input
+    section renders: a ``Returns:`` header followed by a parameter table,
+    plus a one-level unwrap for the meta-tool single-wrapper shape (see
+    ``is_wrapped_single_param``). The unwrap rule matters most here in
+    practice — discriminated-union outputs like ``SheetsOutput`` won't
+    trigger it (multiple top-level fields), but single-wrapped result
+    types like ``{"raw_output": {"type": "string", ...}}`` will.
+
+    Args:
+        tool: The MCP ``Tool`` whose outputSchema is rendered. Required.
+        schema_companion: Optional qualified name (e.g.
+            ``"sheets_server.sheets_schema"``) of a sibling tool that
+            exposes deeper schema introspection (the meta-tool convention
+            of a ``<name>_schema`` companion). When provided AND we've
+            emitted a ``Returns:`` block, we append a single-line pointer
+            so the LLM knows where to look for nested per-action schemas
+            without having to call the tool itself first. We deliberately
+            do NOT emit the hint on tools with no outputSchema — a bare
+            "see the schema tool" hanging in an otherwise-empty section
+            adds noise without context.
+
+    Returns an empty list when the schema yields nothing to render —
+    keeps the caller's append site uncluttered.
+    """
+    properties, required = parse_output_schema(tool)
+    if not properties:
+        return []
+
+    lines: list[str] = ["Returns:"]
+    _emit_param_table(lines, properties, required)
+
+    if is_wrapped_single_param(properties):
+        wrapper_name = next(iter(properties))
+        inner_schema = properties[wrapper_name]
+        inner_properties: dict[str, Any] = inner_schema["properties"]
+        inner_required: set[str] = set(inner_schema.get("required") or [])
+
+        lines.append("")
+        lines.append(f"Fields of `{wrapper_name}`:")
+        _emit_param_table(lines, inner_properties, inner_required)
+
+    if schema_companion:
+        lines.append("")
+        lines.append(
+            f"For the full nested output schema, see `{schema_companion}`."
+        )
+
+    return lines
 
 
 def _build_call_signature(
