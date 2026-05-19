@@ -45,20 +45,40 @@ from runner.agents.coding_mcp_agent.utils import parse_input_schema
 # probe registry. Two strategies, in order:
 #
 # 1. Zero-required-args tool — call with `{}`.
-# 2. `<name>_schema` introspection tool — call with `request={"model": "input"}`.
+# 2. `<name>_schema` introspection tool — inspect the inner `request` property:
+#    call with `request={}` if its inner fields are all optional, else
+#    `request={"model": "input"}` (the canonical schema-discovery payload).
 #
 # If neither applies, the server is skipped with a clear log message.
 # Adding a new MCP server requires NO changes to this file.
 # ---------------------------------------------------------------------------
 
 _NO_ARGS: dict[str, Any] = {}
-_SCHEMA_PROBE_ARGS: dict[str, Any] = {"request": {"model": "input"}}
 
 
 def _required_args(tool: Any) -> list[str]:
     """Get the list of required argument names from a tool's inputSchema."""
     _, required = parse_input_schema(tool)
     return list(required)
+
+
+def _schema_probe_args(tool: Any) -> dict[str, Any]:
+    """Build a `{"request": {...}}` payload that validates against a `*_schema` tool.
+
+    Two conventions exist across servers:
+    - Most servers require an inner ``model`` field (e.g. ``{"model": "input"}``).
+    - The slides server uses an all-optional inner schema (``schema_name`` defaults
+      to None), which rejects unknown fields under ``extra="forbid"``.
+
+    We inspect the inner ``request`` property: if it declares no required fields,
+    send ``{}``; otherwise send the canonical ``{"model": "input"}`` payload.
+    """
+    properties, _ = parse_input_schema(tool)
+    request_schema = properties.get("request") or {}
+    inner_required = set(request_schema.get("required") or [])
+    if not inner_required:
+        return {"request": {}}
+    return {"request": {"model": "input"}}
 
 
 def _pick_probe(
@@ -75,9 +95,9 @@ def _pick_probe(
             return fn_name, _NO_ARGS
 
     # Strategy 2: a `<name>_schema` introspection tool.
-    for fn_name in bound:
+    for fn_name, tool in bound.items():
         if fn_name.endswith("_schema") or fn_name == "schema":
-            return fn_name, _SCHEMA_PROBE_ARGS
+            return fn_name, _schema_probe_args(tool)
 
     return None
 
